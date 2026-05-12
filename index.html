@@ -570,6 +570,9 @@ canvas {
             remotePlayer.frame = msg.frame|0;
             remotePlayer.currentAnim = msg.anim || 'idle';
             remotePlayer.panique = !!msg.panique;
+            // Remote player's viewport (used for symmetric detection in multi)
+            if (msg.halfW) remotePlayer.halfW = msg.halfW;
+            if (msg.halfH) remotePlayer.halfH = msg.halfH;
         } else if (msg.type === 'world_state') {
             // Host -> joiner: snapshot of authoritative world (npc + items)
             applyWorldStateFromHost(msg);
@@ -620,7 +623,8 @@ canvas {
             const entry = worldItems.find(w => w.id === msg.itemId);
             if (entry) {
                 entry.x = msg.x; entry.y = msg.y;
-                entry.spawnX = msg.x; entry.spawnY = msg.y;
+                // IMPORTANT: do NOT overwrite spawnX/spawnY here. The item must
+                // respawn at its original spawn point, not where it landed.
                 entry.picked = false;
                 entry.dropped = true;
                 entry.respawnTimer = 0;
@@ -646,10 +650,25 @@ canvas {
             if (!healthPickup.picked) {
                 healthPickup.picked = true;
                 healthPickup.respawnTimer = healthPickup.respawnDuration;
+                healthPickup.pickupCooldown = 30;
             }
         } else if (msg.type === 'sound_event') {
             // Replay a sound triggered by the other player for awareness
             if (msg.name) playSound(msg.name);
+        } else if (msg.type === 'item_throw') {
+            // The other player threw an item; create a ghost projectile so we
+            // see the same animation. Ghosts don't collide with NPCs or walls
+            // (the thrower's side is authoritative for that).
+            thrownItems.push({
+                id: msg.id,
+                sprite: msg.sprite,
+                x: msg.x, y: msg.y,
+                dx: msg.dx, dy: msg.dy,
+                life: msg.life || 55,
+                size: msg.size || 38,
+                sliding: true,
+                ghost: true,
+            });
         }
     }
 
@@ -670,6 +689,9 @@ canvas {
             frame: player.frame,
             anim: player.currentAnim,
             panique: player.panique,
+            // Local viewport so host can apply detection using THIS player's screen size
+            halfW: canvas.width / (2 * CONFIG.CAMERA_ZOOM),
+            halfH: canvas.height / (2 * CONFIG.CAMERA_ZOOM),
         });
     }
 
@@ -888,6 +910,7 @@ canvas {
         picked: false,
         respawnTimer: 0,         // counts down while picked; respawns when 0
         respawnDuration: 60 * 60, // 60s
+        pickupCooldown: 0,       // local cooldown to avoid double-trigger
     };
     // Exit arrow above the top-left door. Becomes animated yellow once 8+ points reached.
     const exitArrow = {
@@ -1579,24 +1602,27 @@ canvas {
                 }
             }
 
-            // Check if maitresse is "on screen" — used to decide when she gives up chasing.
-            // Uses the SAME reference viewport (~ solo desktop) so detection difficulty is
-            // identical in solo and multi, regardless of the player's actual window size.
-            const REF_HALF_VIEW_W = 282;  // 1920 / (2 * 3.4)
-            const REF_HALF_VIEW_H = 159;  // 1080 / (2 * 3.4)
+            // Check if maitresse is "on screen" — used for solo difficulty parity.
+            // Uses the local player's actual viewport (canvas size + camera zoom).
+            const halfViewW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
+            const halfViewH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
             const margin = npc.angrySpeedTimer > 0 ? 30 : 0;
             let maitresseOnScreen;
             if (gameState.mode === 'multi' && remotePlayer.active) {
-                const near = (px, py) => Math.abs(npc.x - px) < REF_HALF_VIEW_W + margin && Math.abs(npc.y - py) < REF_HALF_VIEW_H + margin;
-                maitresseOnScreen = near(player.x, player.y) || near(remotePlayer.x, remotePlayer.y);
+                // Visible if near EITHER player, using each one's own viewport.
+                const halfW2 = remotePlayer.halfW || halfViewW;
+                const halfH2 = remotePlayer.halfH || halfViewH;
+                const nearLocal = Math.abs(npc.x - player.x) < halfViewW + margin && Math.abs(npc.y - player.y) < halfViewH + margin;
+                const nearRemote = Math.abs(npc.x - remotePlayer.x) < halfW2 + margin && Math.abs(npc.y - remotePlayer.y) < halfH2 + margin;
+                maitresseOnScreen = nearLocal || nearRemote;
             } else {
-                const mOnScreenX = Math.abs(npc.x - camera.x) < REF_HALF_VIEW_W + margin;
-                const mOnScreenY = Math.abs(npc.y - camera.y) < REF_HALF_VIEW_H + margin;
+                const mOnScreenX = Math.abs(npc.x - camera.x) < halfViewW + margin;
+                const mOnScreenY = Math.abs(npc.y - camera.y) < halfViewH + margin;
                 maitresseOnScreen = mOnScreenX && mOnScreenY;
             }
 
-            // Helper: "near culprit" = the angryAt target has the maitresse on their screen.
-            // Uses the same reference viewport defined above (matches solo difficulty).
+            // Helper: "near culprit" = the maitresse is on the culprit's screen.
+            // Uses each player's actual viewport size for fair, solo-equivalent detection.
             const culpritOnScreen = () => {
                 if (gameState.mode !== 'multi') return maitresseOnScreen;
                 let culprit;
@@ -1613,11 +1639,19 @@ canvas {
                     }
                 }
                 if (!culprit || culprit.active === false) return maitresseOnScreen;
-                // Same logic as solo's maitresseOnScreen: check NPC is within the
-                // culprit's viewport (centered on them).
+                // Each player has their own viewport. For the local player we use canvas;
+                // for the remote we use the halfW/halfH they broadcast (falls back to local).
+                let halfW, halfH;
+                if (culprit === player) {
+                    halfW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
+                    halfH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
+                } else {
+                    halfW = culprit.halfW || (canvas.width / (2 * CONFIG.CAMERA_ZOOM));
+                    halfH = culprit.halfH || (canvas.height / (2 * CONFIG.CAMERA_ZOOM));
+                }
                 const margin = npc.angrySpeedTimer > 0 ? 30 : 0;
-                return Math.abs(npc.x - culprit.x) < REF_HALF_VIEW_W + margin &&
-                       Math.abs(npc.y - culprit.y) < REF_HALF_VIEW_H + margin;
+                return Math.abs(npc.x - culprit.x) < halfW + margin &&
+                       Math.abs(npc.y - culprit.y) < halfH + margin;
             };
 
             // Path is recomputed periodically or when target moved significantly.
@@ -1888,14 +1922,19 @@ canvas {
                     }
                 }
 
-                // Target off screen (relative to current chase target's viewport):
-                // switch to angry patrol. Uses reference viewport for parity with solo.
+                // Target off screen (from THEIR own viewport): switch to angry patrol.
                 let stillVisible = maitresseOnScreen;
                 if (gameState.mode === 'multi') {
                     const t = target;
-                    const margin = npc.angrySpeedTimer > 0 ? 30 : 0;
-                    stillVisible = Math.abs(npc.x - t.x) < REF_HALF_VIEW_W + margin &&
-                                   Math.abs(npc.y - t.y) < REF_HALF_VIEW_H + margin;
+                    let halfW, halfH;
+                    if (t === player) {
+                        halfW = halfViewW; halfH = halfViewH;
+                    } else {
+                        halfW = t.halfW || halfViewW;
+                        halfH = t.halfH || halfViewH;
+                    }
+                    stillVisible = Math.abs(npc.x - t.x) < halfW + margin &&
+                                   Math.abs(npc.y - t.y) < halfH + margin;
                 }
                 if (!stillVisible) {
                     resumePatrol(true);
@@ -2206,12 +2245,19 @@ canvas {
         }
 
         // Health pickup: heals 1 HP up to 3 max, then disappears for 60s.
+        // In multi mode the host is authoritative: only the host runs the respawn timer
+        // and decides when the pickup is available again. The joiner just reacts to
+        // healthPickup.picked received via world_state.
+        const hostsThisPickup = (gameState.mode !== 'multi') || net.isHost;
+        if (healthPickup.pickupCooldown > 0) healthPickup.pickupCooldown--;
         if (healthPickup.picked) {
-            healthPickup.respawnTimer--;
-            if (healthPickup.respawnTimer <= 0) {
-                healthPickup.picked = false;
+            if (hostsThisPickup) {
+                healthPickup.respawnTimer--;
+                if (healthPickup.respawnTimer <= 0) {
+                    healthPickup.picked = false;
+                }
             }
-        } else {
+        } else if (healthPickup.pickupCooldown <= 0) {
             const hdx = player.x - healthPickup.x;
             const hdy = player.y - healthPickup.y;
             const hdist = Math.sqrt(hdx * hdx + hdy * hdy);
@@ -2219,6 +2265,7 @@ canvas {
                 player.health = Math.min(3, player.health + 1);
                 healthPickup.picked = true;
                 healthPickup.respawnTimer = healthPickup.respawnDuration;
+                healthPickup.pickupCooldown = 30; // half a second guard
                 broadcastSound('loot');
                 if (gameState.mode === 'multi' && !net.isHost) {
                     netSend({ type: 'request_health_pickup' });
@@ -2356,6 +2403,18 @@ canvas {
                 size: heldSize,
                 sliding: true,
             });
+            // Multi: notify the peer so they see the projectile fly.
+            if (gameState.mode === 'multi' && net.conn && net.conn.open) {
+                netSend({
+                    type: 'item_throw',
+                    id: inventory.item,
+                    sprite: heldSprite,
+                    x: spawnX, y: spawnY,
+                    dx: throwDx * 9, dy: throwDy * 9,
+                    size: heldSize,
+                    life: 55,
+                });
+            }
             inventoryRemoveCurrent();
             inventory.showAnim = 0;
             inventory.showAnimActive = inventory.item !== null;
@@ -2389,6 +2448,22 @@ canvas {
         // Update thrown items
         for (let i = thrownItems.length - 1; i >= 0; i--) {
             const t = thrownItems[i];
+
+            // Ghost projectiles (from peer): no collision, just animate and fade out.
+            if (t.ghost) {
+                if (t.sliding) {
+                    t.x += t.dx;
+                    t.y += t.dy;
+                    t.life--;
+                    t.dx *= 0.94;
+                    t.dy *= 0.94;
+                    if (t.life <= 0) {
+                        thrownItems.splice(i, 1);
+                    }
+                }
+                continue;
+            }
+
             if (t.sliding) {
                 // Step-by-step collision (check each pixel along path)
                 const speed = Math.sqrt(t.dx * t.dx + t.dy * t.dy);
