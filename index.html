@@ -606,6 +606,31 @@ canvas {
                 entry.dropped = true;
                 entry.respawnTimer = 0;
             }
+        } else if (msg.type === 'request_alert') {
+            // Joiner threw an item; check if maitresse is alert toward them.
+            if (!net.isHost) return;
+            for (const n of npcs) {
+                if (!n.patrol) continue;
+                if (n.state === 'glisse' || n.state === 'tombe' || n.state === 'gifle') continue;
+                // Use vigilanceRemote for the joiner's POV
+                if ((n.vigilanceRemote || 'calm') !== 'alert') continue;
+                n.state = 'poursuit';
+                n.vigilance = 'angry';
+                n.angrySpeedTimer = 420;
+                n.angryAt = msg.by || 'remote';
+                n.frame = 0; n.animTimer = 0;
+                n.path = null; n.pathRecalcTimer = 0;
+            }
+        } else if (msg.type === 'request_health_pickup') {
+            // Joiner ramasses item_hp
+            if (!net.isHost) return;
+            if (!healthPickup.picked) {
+                healthPickup.picked = true;
+                healthPickup.respawnTimer = healthPickup.respawnDuration;
+            }
+        } else if (msg.type === 'sound_event') {
+            // Replay a sound triggered by the other player for awareness
+            if (msg.name) playSound(msg.name);
         }
     }
 
@@ -690,12 +715,9 @@ canvas {
             // Display vigilance = what THIS player sees
             npc.vigilance = npc.vigilanceLocal || msg.npc.vigilance;
             npc.slideKind = msg.npc.slideKind || 'h';
-            // chaseTarget: host's 'local' = host's player = our remote
-            if (msg.npc.target) {
-                npc.chaseTarget = msg.npc.target === 'local' ? 'remote' : 'local';
-            } else {
-                npc.chaseTarget = null;
-            }
+            // Store the chaseTarget tag exactly as host sent it.
+            // Inversion is handled in getChaseTarget() when needed.
+            npc.chaseTarget = msg.npc.target;
             // State / sprite resets the frame counter to avoid jumps,
             // but only when state OR sprite changes.
             const stateChanged = prevState !== msg.npc.state;
@@ -1049,6 +1071,17 @@ canvas {
         const m = sounds.music_classe;
         if (!m) return;
         m.play().then(() => { musicStarted = true; }).catch(() => {});
+    }
+
+    // Play a sound locally AND propagate it to the peer in multi.
+    // Use this for sounds the other player should hear from your actions
+    // (loot, drop, etc.). Don't use for sounds already implied by sync state
+    // (glisse, tombe, gifle on the chased target).
+    function broadcastSound(name, volume) {
+        playSound(name, volume);
+        if (gameState.mode === 'multi' && net.conn && net.conn.open) {
+            netSend({ type: 'sound_event', name });
+        }
     }
 
     // Looping glisse sound helpers
@@ -1533,7 +1566,18 @@ canvas {
                 maitresseOnScreen = mOnScreenX && mOnScreenY;
             }
 
-            // Helper: try to move NPC using A* pathfinding, with wall-following fallback.
+            // Helper: in multi, "near culprit" means the angryAt target is on the maitresse's screen.
+            // Falls back to maitresseOnScreen in solo.
+            const culpritOnScreen = () => {
+                if (gameState.mode !== 'multi') return maitresseOnScreen;
+                const culprit = npc.angryAt === 'remote' ? remotePlayer : player;
+                if (!culprit || culprit.active === false) return maitresseOnScreen;
+                const halfVW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
+                const halfVH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
+                return Math.abs(npc.x - culprit.x) < halfVW + 30 &&
+                       Math.abs(npc.y - culprit.y) < halfVH + 30;
+            };
+
             // Path is recomputed periodically or when target moved significantly.
             function moveNpcToward(npc, targetX, targetY, moveSpeed) {
                 const mdx = targetX - npc.x;
@@ -1723,14 +1767,14 @@ canvas {
                 if (npc.frame >= 5) npc.frame = 5;
                 npc.tombeTimer--;
                 if (npc.tombeTimer <= 0) {
-                    npc.angrySpeedTimer = 420; // 7 seconds angry
+                    npc.angrySpeedTimer = 420;
                     npc.vigilance = 'angry';
-                    if (maitresseOnScreen) {
+                    if (culpritOnScreen()) {
                         npc.state = 'poursuit';
                     } else {
                         resumePatrol(true);
                     }
-                    npc.slideKind = 'h'; // reset for next time
+                    npc.slideKind = 'h';
                     npc.frame = 0; npc.animTimer = 0;
                     npc.fps = 6;
                 }
@@ -1800,8 +1844,17 @@ canvas {
                     }
                 }
 
-                // Target off screen (from her perspective): switch to angry patrol
-                if (!maitresseOnScreen) {
+                // Target off screen (from HER perspective, relative to current chase target):
+                // switch to angry patrol.
+                let stillVisible = maitresseOnScreen;
+                if (gameState.mode === 'multi') {
+                    const t = target;
+                    const halfVW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
+                    const halfVH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
+                    stillVisible = Math.abs(npc.x - t.x) < halfVW + 30 &&
+                                   Math.abs(npc.y - t.y) < halfVH + 30;
+                }
+                if (!stillVisible) {
                     resumePatrol(true);
                 }
             } else if (npc.state === 'gifle') {
@@ -1829,7 +1882,7 @@ canvas {
                     npc.frame = 0; npc.animTimer = 0;
                 }
                 // If angry and player appears on screen, pursue!
-                if (npc.angrySpeedTimer > 0 && maitresseOnScreen) {
+                if (npc.angrySpeedTimer > 0 && culpritOnScreen()) {
                     npc.state = 'poursuit';
                     npc.frame = 0; npc.animTimer = 0;
                 }
@@ -1922,7 +1975,7 @@ canvas {
                 }
 
                 // If angry and player appears on screen, pursue!
-                if (npc.angrySpeedTimer > 0 && maitresseOnScreen) {
+                if (npc.angrySpeedTimer > 0 && culpritOnScreen()) {
                     npc.state = 'poursuit';
                     npc.frame = 0; npc.animTimer = 0;
                 }
@@ -2100,7 +2153,7 @@ canvas {
                 inventory.item = item.id;
                 inventory.showAnim = 0;
                 inventory.showAnimActive = true;
-                playSound('loot');
+                broadcastSound('loot');
                 // Multi: notify the other side. Joiner asks host to mark as picked;
                 // host broadcasts via world_state automatically.
                 if (gameState.mode === 'multi' && !net.isHost) {
@@ -2123,7 +2176,10 @@ canvas {
                 player.health = Math.min(3, player.health + 1);
                 healthPickup.picked = true;
                 healthPickup.respawnTimer = healthPickup.respawnDuration;
-                playSound('loot');
+                broadcastSound('loot');
+                if (gameState.mode === 'multi' && !net.isHost) {
+                    netSend({ type: 'request_health_pickup' });
+                }
             }
         }
 
@@ -2199,7 +2255,7 @@ canvas {
                 inventoryRemoveCurrent();
                 inventory.showAnim = 0;
                 inventory.showAnimActive = inventory.item !== null;
-                playSound('drop');
+                broadcastSound('drop');
             } else {
             // Determine throw direction based on player facing
             let throwDx = 0, throwDy = 0;
@@ -2256,19 +2312,29 @@ canvas {
             inventoryRemoveCurrent();
             inventory.showAnim = 0;
             inventory.showAnimActive = inventory.item !== null;
-            playSound('drop');
+            broadcastSound('drop');
 
             // Throwing in front of an alert (yellow) NPC instantly triggers pursuit:
             // she saw the projectile fly past her face.
-            for (const n of npcs) {
-                if (!n.patrol) continue;
-                if (n.vigilance !== 'alert') continue;
-                if (n.state === 'glisse' || n.state === 'tombe' || n.state === 'gifle') continue;
-                n.state = 'poursuit';
-                n.vigilance = 'angry';
-                n.angrySpeedTimer = 420; // 7s of anger
-                n.frame = 0; n.animTimer = 0;
-                n.path = null; n.pathRecalcTimer = 0;
+            // In multi: if we're not the host, send request_alert and let the host decide.
+            if (gameState.mode === 'multi' && !net.isHost) {
+                netSend({ type: 'request_alert', by: 'remote' });
+            } else {
+                for (const n of npcs) {
+                    if (!n.patrol) continue;
+                    // Use per-player vigilance in multi: she's "alert" toward THIS player only.
+                    const vForUs = (gameState.mode === 'multi')
+                        ? (n.vigilanceLocal || 'calm') // host's local view = the thrower
+                        : n.vigilance;
+                    if (vForUs !== 'alert') continue;
+                    if (n.state === 'glisse' || n.state === 'tombe' || n.state === 'gifle') continue;
+                    n.state = 'poursuit';
+                    n.vigilance = 'angry';
+                    n.angrySpeedTimer = 420;
+                    n.angryAt = 'local'; // the thrower is the host's local
+                    n.frame = 0; n.animTimer = 0;
+                    n.path = null; n.pathRecalcTimer = 0;
+                }
             }
             }
         }
