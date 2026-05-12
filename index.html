@@ -1576,8 +1576,11 @@ canvas {
                 maitresseOnScreen = mOnScreenX && mOnScreenY;
             }
 
-            // Helper: in multi, "near culprit" means the angryAt target is on the maitresse's screen.
-            // Falls back to the closest player if no angryAt is set, or in solo to maitresseOnScreen.
+            // Helper: "near culprit" = the angryAt target is within detection range.
+            // Uses a fixed world radius (not the canvas viewport) so detection is
+            // independent of window size in multi mode.
+            const DETECT_RADIUS_X = 240;  // half-width in world units
+            const DETECT_RADIUS_Y = 160;  // half-height
             const culpritOnScreen = () => {
                 if (gameState.mode !== 'multi') return maitresseOnScreen;
                 let culprit;
@@ -1595,10 +1598,8 @@ canvas {
                     }
                 }
                 if (!culprit || culprit.active === false) return maitresseOnScreen;
-                const halfVW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
-                const halfVH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
-                return Math.abs(npc.x - culprit.x) < halfVW + 30 &&
-                       Math.abs(npc.y - culprit.y) < halfVH + 30;
+                return Math.abs(npc.x - culprit.x) < DETECT_RADIUS_X &&
+                       Math.abs(npc.y - culprit.y) < DETECT_RADIUS_Y;
             };
 
             // Path is recomputed periodically or when target moved significantly.
@@ -1852,16 +1853,18 @@ canvas {
                     npc.state = 'gifle';
                     npc.frame = 0; npc.animTimer = 0;
                     npc.tombeTimer = 48;
-                    // Apply damage to the right player
+                    // Apply damage to the right player; play gifle sound on both sides.
                     if (target === player) {
                         player.gifleActive = true;
                         player.gifleTimer = 48;
                         player.health = Math.max(0, player.health - 1);
                         player.headBlink = 120;
                         player.frame = 0; player.animTimer = 0;
-                        playSound('gifle');
+                        // We're slapped: broadcast so the peer hears it too.
+                        broadcastSound('gifle');
                     } else {
-                        // Target is the remote player. Notify them.
+                        // Target is the remote player. Notify them; the world_event
+                        // will play the sound on their side, so we just play locally here.
                         netSend({ type: 'world_event', event: 'gifle_remote' });
                         playSound('gifle');
                     }
@@ -1872,10 +1875,8 @@ canvas {
                 let stillVisible = maitresseOnScreen;
                 if (gameState.mode === 'multi') {
                     const t = target;
-                    const halfVW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
-                    const halfVH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
-                    stillVisible = Math.abs(npc.x - t.x) < halfVW + 30 &&
-                                   Math.abs(npc.y - t.y) < halfVH + 30;
+                    stillVisible = Math.abs(npc.x - t.x) < DETECT_RADIUS_X &&
+                                   Math.abs(npc.y - t.y) < DETECT_RADIUS_Y;
                 }
                 if (!stillVisible) {
                     resumePatrol(true);
