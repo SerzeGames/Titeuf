@@ -743,6 +743,12 @@ canvas {
             for (const incoming of msg.items) {
                 const entry = worldItems.find(w => w.id === incoming.id);
                 if (entry) {
+                    // If we just locally dropped this item, ignore host's stale position for a moment.
+                    if (entry._localDropCooldown > 0) {
+                        entry.picked = incoming.picked;
+                        entry.dropped = incoming.dropped;
+                        continue;
+                    }
                     entry._netTargetX = incoming.x;
                     entry._netTargetY = incoming.y;
                     if (entry._netInitialized !== true) {
@@ -1491,8 +1497,12 @@ canvas {
                     }
                 }
             }
-            // Also interpolate items
+            // Also interpolate items (skip those in local drop cooldown so they stay put)
             for (const item of worldItems) {
+                if (item._localDropCooldown > 0) {
+                    item._localDropCooldown--;
+                    continue;
+                }
                 if (item._netTargetX !== undefined) {
                     const k = 0.30;
                     item.x += (item._netTargetX - item.x) * k;
@@ -1567,10 +1577,23 @@ canvas {
             }
 
             // Helper: in multi, "near culprit" means the angryAt target is on the maitresse's screen.
-            // Falls back to maitresseOnScreen in solo.
+            // Falls back to the closest player if no angryAt is set, or in solo to maitresseOnScreen.
             const culpritOnScreen = () => {
                 if (gameState.mode !== 'multi') return maitresseOnScreen;
-                const culprit = npc.angryAt === 'remote' ? remotePlayer : player;
+                let culprit;
+                if (npc.angryAt === 'remote') {
+                    culprit = remotePlayer;
+                } else if (npc.angryAt === 'local') {
+                    culprit = player;
+                } else {
+                    // No specific anger target: pick closest visible player as a fallback
+                    if (!remotePlayer.active) culprit = player;
+                    else {
+                        const dL = Math.hypot(player.x - npc.x, player.y - npc.y);
+                        const dR = Math.hypot(remotePlayer.x - npc.x, remotePlayer.y - npc.y);
+                        culprit = dR < dL ? remotePlayer : player;
+                    }
+                }
                 if (!culprit || culprit.active === false) return maitresseOnScreen;
                 const halfVW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
                 const halfVH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
@@ -2245,10 +2268,14 @@ canvas {
                     entry.x = px; entry.y = py;
                     entry.picked = false;
                     entry.respawnTimer = 0;
-                    entry.dropped = true; // marks as a trap
-                    entry.pickupCooldown = 60; // 1s before Titeuf can pick it back
+                    entry.dropped = true;
+                    entry.pickupCooldown = 60;
                     // Multi sync
                     if (gameState.mode === 'multi' && !net.isHost) {
+                        // Lock position locally for a moment to ignore stale host snapshots
+                        entry._localDropCooldown = 60;
+                        entry._netTargetX = px;
+                        entry._netTargetY = py;
                         netSend({ type: 'request_drop', itemId: entry.id, x: px, y: py });
                     }
                 }
@@ -2436,8 +2463,11 @@ canvas {
                         entry.x = t.x; entry.y = t.y;
                         entry.picked = false;
                         entry.respawnTimer = 0;
-                        entry.dropped = true; // thrown by Titeuf -> acts as a trap
+                        entry.dropped = true;
                         if (gameState.mode === 'multi' && !net.isHost) {
+                            entry._localDropCooldown = 60;
+                            entry._netTargetX = t.x;
+                            entry._netTargetY = t.y;
                             netSend({ type: 'request_drop', itemId: entry.id, x: t.x, y: t.y });
                         }
                     } else {
@@ -2463,6 +2493,9 @@ canvas {
                         entry.respawnTimer = 0;
                         entry.dropped = true;
                         if (gameState.mode === 'multi' && !net.isHost) {
+                            entry._localDropCooldown = 60;
+                            entry._netTargetX = t.x;
+                            entry._netTargetY = t.y;
                             netSend({ type: 'request_drop', itemId: entry.id, x: t.x, y: t.y });
                         }
                     } else {
