@@ -2,17 +2,36 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
 <title>Titeuf - Ze Gag Machine</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #000;
+    /* Prevent mobile browsers from intercepting touch as scroll/zoom */
+    touch-action: none;
+    -ms-touch-action: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    user-select: none;
+    overscroll-behavior: none;
+    position: fixed;
+    inset: 0;
+}
 canvas {
     display: block;
     width: 100vw;
     height: 100vh;
     image-rendering: pixelated;
     cursor: none;
+    touch-action: none;
 }
 #loading {
     position: fixed; inset: 0;
@@ -2990,8 +3009,17 @@ canvas {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
         ctx.imageSmoothingEnabled = false;
+        // Adaptive zoom: ensure a minimum world viewport so the game stays playable
+        // on small screens. Targets at least 280x200 world units visible.
+        const MIN_VIEW_W = 280;
+        const MIN_VIEW_H = 200;
+        const targetZoom = 3.4;
+        const maxZoomW = canvas.width / MIN_VIEW_W;
+        const maxZoomH = canvas.height / MIN_VIEW_H;
+        CONFIG.CAMERA_ZOOM = Math.min(targetZoom, maxZoomW, maxZoomH);
     }
     window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', () => setTimeout(resize, 100));
 
     // ========== GAME LOOP ==========
     const FRAME_TIME = 1000 / 60;
