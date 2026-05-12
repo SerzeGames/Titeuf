@@ -1580,26 +1580,23 @@ canvas {
             }
 
             // Check if maitresse is "on screen" — used to decide when she gives up chasing.
-            // In multi: she stays "on screen" as long as she's near any player.
-            const halfViewW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
-            const halfViewH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
+            // Uses the SAME reference viewport (~ solo desktop) so detection difficulty is
+            // identical in solo and multi, regardless of the player's actual window size.
+            const REF_HALF_VIEW_W = 282;  // 1920 / (2 * 3.4)
+            const REF_HALF_VIEW_H = 159;  // 1080 / (2 * 3.4)
             const margin = npc.angrySpeedTimer > 0 ? 30 : 0;
             let maitresseOnScreen;
             if (gameState.mode === 'multi' && remotePlayer.active) {
-                // Visible if near either player
-                const near = (px, py) => Math.abs(npc.x - px) < halfViewW + margin && Math.abs(npc.y - py) < halfViewH + margin;
+                const near = (px, py) => Math.abs(npc.x - px) < REF_HALF_VIEW_W + margin && Math.abs(npc.y - py) < REF_HALF_VIEW_H + margin;
                 maitresseOnScreen = near(player.x, player.y) || near(remotePlayer.x, remotePlayer.y);
             } else {
-                const mOnScreenX = Math.abs(npc.x - camera.x) < halfViewW + margin;
-                const mOnScreenY = Math.abs(npc.y - camera.y) < halfViewH + margin;
+                const mOnScreenX = Math.abs(npc.x - camera.x) < REF_HALF_VIEW_W + margin;
+                const mOnScreenY = Math.abs(npc.y - camera.y) < REF_HALF_VIEW_H + margin;
                 maitresseOnScreen = mOnScreenX && mOnScreenY;
             }
 
-            // Helper: "near culprit" = the angryAt target is within detection range.
-            // Uses a fixed world radius (not the canvas viewport) so detection is
-            // independent of window size in multi mode.
-            const DETECT_RADIUS_X = 240;  // half-width in world units
-            const DETECT_RADIUS_Y = 160;  // half-height
+            // Helper: "near culprit" = the angryAt target has the maitresse on their screen.
+            // Uses the same reference viewport defined above (matches solo difficulty).
             const culpritOnScreen = () => {
                 if (gameState.mode !== 'multi') return maitresseOnScreen;
                 let culprit;
@@ -1608,7 +1605,6 @@ canvas {
                 } else if (npc.angryAt === 'local') {
                     culprit = player;
                 } else {
-                    // No specific anger target: pick closest visible player as a fallback
                     if (!remotePlayer.active) culprit = player;
                     else {
                         const dL = Math.hypot(player.x - npc.x, player.y - npc.y);
@@ -1617,8 +1613,11 @@ canvas {
                     }
                 }
                 if (!culprit || culprit.active === false) return maitresseOnScreen;
-                return Math.abs(npc.x - culprit.x) < DETECT_RADIUS_X &&
-                       Math.abs(npc.y - culprit.y) < DETECT_RADIUS_Y;
+                // Same logic as solo's maitresseOnScreen: check NPC is within the
+                // culprit's viewport (centered on them).
+                const margin = npc.angrySpeedTimer > 0 ? 30 : 0;
+                return Math.abs(npc.x - culprit.x) < REF_HALF_VIEW_W + margin &&
+                       Math.abs(npc.y - culprit.y) < REF_HALF_VIEW_H + margin;
             };
 
             // Path is recomputed periodically or when target moved significantly.
@@ -1889,13 +1888,14 @@ canvas {
                     }
                 }
 
-                // Target off screen (from HER perspective, relative to current chase target):
-                // switch to angry patrol.
+                // Target off screen (relative to current chase target's viewport):
+                // switch to angry patrol. Uses reference viewport for parity with solo.
                 let stillVisible = maitresseOnScreen;
                 if (gameState.mode === 'multi') {
                     const t = target;
-                    stillVisible = Math.abs(npc.x - t.x) < DETECT_RADIUS_X &&
-                                   Math.abs(npc.y - t.y) < DETECT_RADIUS_Y;
+                    const margin = npc.angrySpeedTimer > 0 ? 30 : 0;
+                    stillVisible = Math.abs(npc.x - t.x) < REF_HALF_VIEW_W + margin &&
+                                   Math.abs(npc.y - t.y) < REF_HALF_VIEW_H + margin;
                 }
                 if (!stillVisible) {
                     resumePatrol(true);
