@@ -1,0 +1,3130 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Titeuf - Ze Gag Machine</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    image-rendering: pixelated;
+    cursor: none;
+}
+#loading {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    background: #1a0a2e;
+    color: #ffd700;
+    font-family: 'Comic Sans MS', cursive;
+    font-size: 28px;
+    z-index: 100;
+    transition: opacity 0.5s;
+}
+#loading .bar-bg {
+    width: 300px; height: 20px;
+    background: #2a1a3e; border-radius: 10px;
+    margin-top: 20px; overflow: hidden;
+}
+#loading .bar-fill {
+    width: 0%; height: 100%;
+    background: linear-gradient(90deg, #ff6b35, #ffd700);
+    border-radius: 10px;
+    transition: width 0.3s;
+}
+#nicknameModal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    font-family: "Comic Sans MS", cursive, sans-serif;
+}
+#nicknameModal .panel {
+    background: #f4c41e;
+    border: 6px solid #5a2a8c;
+    border-radius: 16px;
+    padding: 32px 40px;
+    text-align: center;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+    min-width: 320px;
+}
+#nicknameModal h2 {
+    color: #5a2a8c;
+    margin: 0 0 16px 0;
+    font-size: 28px;
+}
+#nicknameModal input {
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 22px;
+    padding: 10px 14px;
+    border: 3px solid #5a2a8c;
+    border-radius: 8px;
+    background: #fff8d8;
+    color: #3a1850;
+    outline: none;
+    font-family: inherit;
+}
+#nicknameModal button {
+    margin-top: 18px;
+    font-size: 22px;
+    padding: 10px 30px;
+    background: #5a2a8c;
+    color: #f4c41e;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-family: inherit;
+    font-weight: bold;
+}
+#nicknameModal button:hover {
+    background: #7a3aac;
+}
+#nicknameModal .error {
+    color: #c00;
+    margin-top: 10px;
+    font-size: 14px;
+    min-height: 18px;
+}
+</style>
+</head>
+<body>
+<div id="loading">
+    <div>Chargement de Titeuf...</div>
+    <div class="bar-bg"><div class="bar-fill" id="loadBar"></div></div>
+</div>
+<canvas id="game"></canvas>
+<div id="nicknameModal">
+    <div class="panel">
+        <h2>TON PSEUDO</h2>
+        <input id="nicknameInput" type="text" maxlength="14" placeholder="Titeuf" autocomplete="off" />
+        <div class="error" id="nicknameError"></div>
+        <button id="nicknameOk">RECHERCHE RAPIDE</button>
+    </div>
+</div>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(() => {
+    'use strict';
+
+    // ========== CONFIG ==========
+    const CONFIG = {
+        // Map (drawn at half scale in world space)
+        MAP_SCALE: 0.5,
+        MAP_W: 1536 * 0.5,  // 768
+        MAP_H: 1024 * 0.5,  // 512
+        // Sprite sheets: all 256x128, grid 4 cols x 2 rows, cells 64x64
+        SPRITE_COLS: 4,
+        SPRITE_CELL_W: 64,
+        SPRITE_CELL_H: 64,
+        // Player
+        PLAYER_SCALE: 1.8,
+        PLAYER_SPEED: 4.0,
+        ANIM_SPEED: 0.13,
+        // Camera
+        CAMERA_ZOOM: 3.4,
+        CAMERA_LERP: 0.08,
+        // Collision
+        PLAYER_HITBOX: { w: 45, h: 20, offsetY: 18 },
+    };
+
+    const S = CONFIG.MAP_SCALE;
+    const P_RENDER_W = CONFIG.SPRITE_CELL_W * CONFIG.PLAYER_SCALE;
+    const P_RENDER_H = CONFIG.SPRITE_CELL_H * CONFIG.PLAYER_SCALE;
+
+    // ========== COLLISION RECTS ==========
+    const COLLIDERS = [
+        { x: 0, y: 0, w: CONFIG.MAP_W, h: 80 },
+        { x: 0, y: 0, w: 5, h: CONFIG.MAP_H },
+        { x: CONFIG.MAP_W - 5, y: 0, w: 5, h: CONFIG.MAP_H },
+        { x: 0, y: CONFIG.MAP_H - 5, w: CONFIG.MAP_W, h: 5 },
+        { x: 36, y: 55, w: 78, h: 40 },
+        { x: 545, y: 55, w: 78, h: 40 },
+        { x: 650, y: 55, w: 78, h: 40 },
+        { x: 320, y: 100, w: 100, h: 60 },
+        { x: 115, y: 164, w: 130, h: 71 },
+        { x: 500, y: 164, w: 145, h: 71 },
+        { x: 100, y: 340, w: 165, h: 70 },
+        { x: 480, y: 340, w: 165, h: 70 },
+    ];
+
+    // ========== NAVIGATION GRID & A* PATHFINDING ==========
+    // The grid marks cells as walkable or blocked. We inflate colliders by an NPC
+    // hitbox margin so the path keeps a safe distance from corners.
+    const NAV_CELL = 12;          // grid resolution in world pixels
+    const NAV_INFLATE = 18;       // expand obstacles by this much (~half NPC hitbox)
+    const NAV_COLS = Math.ceil(CONFIG.MAP_W / NAV_CELL);
+    const NAV_ROWS = Math.ceil(CONFIG.MAP_H / NAV_CELL);
+    const navGrid = new Uint8Array(NAV_COLS * NAV_ROWS); // 0=walkable, 1=blocked
+
+    (function buildNavGrid() {
+        for (let r = 0; r < NAV_ROWS; r++) {
+            for (let c = 0; c < NAV_COLS; c++) {
+                const cx = c * NAV_CELL + NAV_CELL / 2;
+                const cy = r * NAV_CELL + NAV_CELL / 2;
+                let blocked = false;
+                for (const col of COLLIDERS) {
+                    if (cx > col.x - NAV_INFLATE && cx < col.x + col.w + NAV_INFLATE &&
+                        cy > col.y - NAV_INFLATE && cy < col.y + col.h + NAV_INFLATE) {
+                        blocked = true; break;
+                    }
+                }
+                navGrid[r * NAV_COLS + c] = blocked ? 1 : 0;
+            }
+        }
+    })();
+
+    function navIsWalkable(c, r) {
+        if (c < 0 || c >= NAV_COLS || r < 0 || r >= NAV_ROWS) return false;
+        return navGrid[r * NAV_COLS + c] === 0;
+    }
+
+    function worldToGrid(x, y) {
+        return { c: Math.floor(x / NAV_CELL), r: Math.floor(y / NAV_CELL) };
+    }
+    function gridToWorld(c, r) {
+        return { x: c * NAV_CELL + NAV_CELL / 2, y: r * NAV_CELL + NAV_CELL / 2 };
+    }
+
+    // Find nearest walkable cell (used when start or end is inside an obstacle)
+    function nearestWalkable(c, r) {
+        if (navIsWalkable(c, r)) return { c, r };
+        for (let radius = 1; radius < 12; radius++) {
+            for (let dr = -radius; dr <= radius; dr++) {
+                for (let dc = -radius; dc <= radius; dc++) {
+                    if (Math.abs(dr) !== radius && Math.abs(dc) !== radius) continue;
+                    if (navIsWalkable(c + dc, r + dr)) return { c: c + dc, r: r + dr };
+                }
+            }
+        }
+        return null;
+    }
+
+    // A* pathfinding. Returns array of {x, y} world points, or null if no path.
+    function findPath(startX, startY, endX, endY) {
+        const start = worldToGrid(startX, startY);
+        const end = worldToGrid(endX, endY);
+        const ws = nearestWalkable(start.c, start.r);
+        const we = nearestWalkable(end.c, end.r);
+        if (!ws || !we) return null;
+
+        const startKey = ws.r * NAV_COLS + ws.c;
+        const endKey = we.r * NAV_COLS + we.c;
+        if (startKey === endKey) return [{ x: endX, y: endY }];
+
+        // 8-directional moves
+        const moves = [
+            { dc: 1, dr: 0, cost: 10 }, { dc: -1, dr: 0, cost: 10 },
+            { dc: 0, dr: 1, cost: 10 }, { dc: 0, dr: -1, cost: 10 },
+            { dc: 1, dr: 1, cost: 14 }, { dc: 1, dr: -1, cost: 14 },
+            { dc: -1, dr: 1, cost: 14 }, { dc: -1, dr: -1, cost: 14 },
+        ];
+
+        const gScore = new Map();
+        const fScore = new Map();
+        const cameFrom = new Map();
+        const closed = new Set();
+        // Simple priority queue using sorted array (good enough for our grid size)
+        const open = [{ key: startKey, c: ws.c, r: ws.r, f: 0 }];
+        gScore.set(startKey, 0);
+
+        function heuristic(c, r) {
+            const dc = Math.abs(c - we.c);
+            const dr = Math.abs(r - we.r);
+            return 10 * (dc + dr) + (14 - 20) * Math.min(dc, dr); // octile distance
+        }
+
+        let iterations = 0;
+        const MAX_ITER = 5000; // safety cap
+        while (open.length > 0 && iterations++ < MAX_ITER) {
+            // Pop lowest f
+            let bestIdx = 0;
+            for (let i = 1; i < open.length; i++) {
+                if (open[i].f < open[bestIdx].f) bestIdx = i;
+            }
+            const current = open.splice(bestIdx, 1)[0];
+            if (current.key === endKey) {
+                // Reconstruct path
+                const cells = [];
+                let k = endKey;
+                let cc = we.c, cr = we.r;
+                while (k !== startKey) {
+                    cells.push({ c: cc, r: cr });
+                    const prev = cameFrom.get(k);
+                    if (!prev) break;
+                    cc = prev.c; cr = prev.r;
+                    k = cr * NAV_COLS + cc;
+                }
+                cells.reverse();
+                // Convert to world points; replace last with actual target
+                const path = cells.map(({ c, r }) => gridToWorld(c, r));
+                if (path.length > 0) {
+                    path[path.length - 1] = { x: endX, y: endY };
+                }
+                return path;
+            }
+            closed.add(current.key);
+
+            for (const m of moves) {
+                const nc = current.c + m.dc;
+                const nr = current.r + m.dr;
+                if (!navIsWalkable(nc, nr)) continue;
+                // Prevent diagonal cutting through corners
+                if (m.dc !== 0 && m.dr !== 0) {
+                    if (!navIsWalkable(current.c + m.dc, current.r) ||
+                        !navIsWalkable(current.c, current.r + m.dr)) continue;
+                }
+                const nk = nr * NAV_COLS + nc;
+                if (closed.has(nk)) continue;
+                const tentativeG = gScore.get(current.key) + m.cost;
+                if (tentativeG < (gScore.get(nk) ?? Infinity)) {
+                    cameFrom.set(nk, { c: current.c, r: current.r });
+                    gScore.set(nk, tentativeG);
+                    const f = tentativeG + heuristic(nc, nr);
+                    fScore.set(nk, f);
+                    // Update or push in open
+                    let existingIdx = -1;
+                    for (let i = 0; i < open.length; i++) {
+                        if (open[i].key === nk) { existingIdx = i; break; }
+                    }
+                    if (existingIdx >= 0) open[existingIdx].f = f;
+                    else open.push({ key: nk, c: nc, r: nr, f });
+                }
+            }
+        }
+        return null; // no path
+    }
+
+    // Path smoothing: skip waypoints reachable by direct line of sight to shorten the path
+    function smoothPath(path, hitbox) {
+        if (!path || path.length < 3) return path;
+        function lineFree(ax, ay, bx, by) {
+            const dx = bx - ax, dy = by - ay;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const steps = Math.ceil(dist / 6);
+            for (let s = 1; s <= steps; s++) {
+                const t = s / steps;
+                const x = ax + dx * t, y = ay + dy * t;
+                const hb = { x: x - hitbox.w/2, y: y + hitbox.offsetY - hitbox.h/2, w: hitbox.w, h: hitbox.h };
+                for (const c of COLLIDERS) {
+                    if (rectsOverlap(hb, c)) return false;
+                }
+            }
+            return true;
+        }
+        const out = [path[0]];
+        let i = 0;
+        while (i < path.length - 1) {
+            let j = path.length - 1;
+            while (j > i + 1 && !lineFree(path[i].x, path[i].y, path[j].x, path[j].y)) j--;
+            out.push(path[j]);
+            i = j;
+        }
+        return out;
+    }
+
+    // Frame counts per animation (idle = 5, running = 8)
+    const ANIM_FRAMES = {
+        idle: 5,
+        idle_down: 5,
+        idle_up: 5,
+        idle_diag_haut: 5,
+        idle_diag_bas: 5,
+        run: 8,
+        run_down: 8,
+        run_up: 8,
+        diag: 8,
+        diag_bas: 8,
+        gifle: 3,
+        panique: 4,
+        panique_haut: 4,
+        panique_bas: 4,
+        panique_diag_haut: 4,
+        panique_diag_bas: 4,
+    };
+
+    // ========== STATE ==========
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const keys = {};
+    const player = {
+        x: 350, y: 280,
+        facingLeft: true,
+        frame: 0,
+        animTimer: 0,
+        moving: false,
+        currentAnim: 'idle',
+        lastDirection: 'side',
+        // Health & gifle
+        health: 3,
+        gifleTimer: 0,      // frames of gifle animation
+        gifleActive: false,
+        headBlink: 0,        // blink timer for HUD head
+        // Panique state
+        panique: false,
+        mashCount: 0,         // number of A presses in the recent window
+        mashTimer: 0,         // frames since last A press (decays mashCount)
+        // Score
+        score: 0,
+        scorePopup: null,    // { text: '+x', timer: frames }
+    };
+    // Remote player state (multi only) — purely visual; positions come over the network.
+    const remotePlayer = {
+        active: false,           // becomes true when first net update arrives
+        x: 350, y: 280,
+        facingLeft: false,
+        frame: 0,
+        currentAnim: 'idle',
+        panique: false,
+    };
+    const camera = { x: 350, y: 280 };
+
+    // ========== GAME STATE MACHINE ==========
+    // 'menu' -> 'defi' -> 'game'. Multi adds 'lobby' between menu and defi.
+    const gameState = {
+        screen: 'menu',
+        menuSelection: 0,
+        defiAnim: 0,
+        mode: 'solo',           // 'solo' or 'multi'
+        defiReadyCount: 0,      // multi: number of players who pressed A on defi (host-tracked)
+        defiSelfReady: false,   // local: has this player pressed A on defi?
+    };
+
+    // ========== MULTIPLAYER (PeerJS) ==========
+    // Quick-match strategy: a small pool of well-known PeerJS IDs forms a virtual lobby.
+    // Host claims the first free slot. Joiner probes the slots until it finds one taken.
+    const LOBBY_SLOTS = [
+        'titeuf-ze-classroom-lobby-01',
+        'titeuf-ze-classroom-lobby-02',
+        'titeuf-ze-classroom-lobby-03',
+        'titeuf-ze-classroom-lobby-04',
+        'titeuf-ze-classroom-lobby-05',
+    ];
+    const net = {
+        peer: null,             // PeerJS instance
+        conn: null,             // active DataConnection
+        isHost: false,
+        connected: false,
+        nickname: '',
+        peerNickname: '',
+        searchStatus: 'idle',   // 'idle' | 'searching' | 'hosting' | 'connecting' | 'ready' | 'error'
+        searchMessage: '',
+    };
+
+    // Send a message to the other peer (no-op if no connection)
+    function netSend(msg) {
+        if (!net.conn || !net.conn.open) return;
+        try { net.conn.send(msg); } catch (_) {}
+    }
+
+    // Try to be a JOINER: probe slots in order, connect to the first one alive.
+    async function tryJoinExistingLobby() {
+        for (const slotId of LOBBY_SLOTS) {
+            const success = await new Promise((resolve) => {
+                let resolved = false;
+                const probePeer = new Peer(undefined, { debug: 0 });
+                let conn = null;
+                const cleanup = (ok) => {
+                    if (resolved) return;
+                    resolved = true;
+                    if (!ok && conn) try { conn.close(); } catch (_) {}
+                    if (!ok) try { probePeer.destroy(); } catch (_) {}
+                    resolve(ok);
+                };
+                const timeout = setTimeout(() => cleanup(false), 3000);
+                probePeer.on('open', () => {
+                    conn = probePeer.connect(slotId, { reliable: true });
+                    conn.on('open', () => {
+                        clearTimeout(timeout);
+                        // We made it; promote this peer and conn to global state.
+                        net.peer = probePeer;
+                        net.conn = conn;
+                        net.isHost = false;
+                        wireConnection(conn);
+                        cleanup(true);
+                    });
+                    conn.on('error', () => cleanup(false));
+                });
+                probePeer.on('error', () => cleanup(false));
+            });
+            if (success) return true;
+        }
+        return false;
+    }
+
+    // Become a HOST: claim the first available slot.
+    async function tryBecomeHost() {
+        for (const slotId of LOBBY_SLOTS) {
+            const success = await new Promise((resolve) => {
+                let resolved = false;
+                const hostPeer = new Peer(slotId, { debug: 0 });
+                const cleanup = (ok) => {
+                    if (resolved) return;
+                    resolved = true;
+                    if (!ok) try { hostPeer.destroy(); } catch (_) {}
+                    resolve(ok);
+                };
+                const timeout = setTimeout(() => cleanup(false), 3000);
+                hostPeer.on('open', () => {
+                    clearTimeout(timeout);
+                    net.peer = hostPeer;
+                    net.isHost = true;
+                    // Wait for a joiner
+                    hostPeer.on('connection', (conn) => {
+                        // Reject if we already have a connection (shouldn't happen, but safe)
+                        if (net.conn && net.conn.open) { try { conn.close(); } catch (_) {} return; }
+                        net.conn = conn;
+                        conn.on('open', () => {
+                            wireConnection(conn);
+                            // Send our nickname so the joiner can display it
+                            netSend({ type: 'hello', nickname: net.nickname });
+                        });
+                    });
+                    cleanup(true);
+                });
+                hostPeer.on('error', () => cleanup(false));
+            });
+            if (success) return true;
+        }
+        return false;
+    }
+
+    function wireConnection(conn) {
+        conn.on('data', onNetData);
+        conn.on('close', () => {
+            net.connected = false;
+            net.searchStatus = 'error';
+            net.searchMessage = 'Connexion perdue';
+        });
+        // For the joiner: announce ourselves immediately
+        if (!net.isHost) {
+            net.connected = true;
+            netSend({ type: 'hello', nickname: net.nickname });
+        }
+    }
+
+    function onNetData(msg) {
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.type === 'hello') {
+            net.peerNickname = msg.nickname || 'Joueur';
+            net.connected = true;
+            net.searchStatus = 'ready';
+        } else if (msg.type === 'start_defi') {
+            // Host signals: leave lobby, show defi screen
+            gameState.screen = 'defi';
+            gameState.defiAnim = 0;
+            gameState.defiSelfReady = false;
+            gameState.defiReadyCount = 0;
+            restartMusicFromStart();
+        } else if (msg.type === 'defi_ready') {
+            // Track readiness (host counts both, broadcasts)
+            if (net.isHost) {
+                gameState.defiReadyCount = Math.min(2, gameState.defiReadyCount + 1);
+                // If both ready, start the game
+                if (gameState.defiReadyCount >= 2 && gameState.defiSelfReady) {
+                    netSend({ type: 'start_game' });
+                    startGame();
+                }
+            }
+        } else if (msg.type === 'start_game') {
+            startGame();
+        } else if (msg.type === 'player_state') {
+            // Other player's transform/animation snapshot
+            remotePlayer.active = true;
+            remotePlayer.x = msg.x;
+            remotePlayer.y = msg.y;
+            remotePlayer.facingLeft = !!msg.facingLeft;
+            remotePlayer.frame = msg.frame|0;
+            remotePlayer.currentAnim = msg.anim || 'idle';
+            remotePlayer.panique = !!msg.panique;
+        } else if (msg.type === 'world_state') {
+            // Host -> joiner: snapshot of authoritative world (npc + items)
+            applyWorldStateFromHost(msg);
+        } else if (msg.type === 'world_event') {
+            // One-shot events from host (e.g. she just slipped, item picked, etc.)
+            applyWorldEvent(msg);
+        }
+    }
+
+    // Send our player state to the peer (called once per frame in multi)
+    let netPlayerTickCounter = 0;
+    function netTickPlayer() {
+        if (gameState.mode !== 'multi') return;
+        if (!net.conn || !net.conn.open) return;
+        // Throttle to ~20 Hz to keep traffic light
+        netPlayerTickCounter++;
+        if (netPlayerTickCounter < 3) return;
+        netPlayerTickCounter = 0;
+        netSend({
+            type: 'player_state',
+            x: Math.round(player.x * 10) / 10,
+            y: Math.round(player.y * 10) / 10,
+            facingLeft: player.facingLeft,
+            frame: player.frame,
+            anim: player.currentAnim,
+            panique: player.panique,
+        });
+    }
+
+    // Host -> joiner authoritative state snapshot
+    function netTickWorldState() {
+        if (gameState.mode !== 'multi' || !net.isHost) return;
+        if (!net.conn || !net.conn.open) return;
+        // Throttle ~15 Hz
+        netWorldTickCounter++;
+        if (netWorldTickCounter < 4) return;
+        netWorldTickCounter = 0;
+        const npc = npcs[0];
+        if (!npc) return;
+        netSend({
+            type: 'world_state',
+            npc: {
+                x: Math.round(npc.x * 10) / 10,
+                y: Math.round(npc.y * 10) / 10,
+                facingLeft: npc.facingLeft,
+                state: npc.state,
+                vigilance: npc.vigilance,
+                slideKind: npc.slideKind || 'h',
+                frame: npc.frame,
+                currentSprite: npc.currentSprite,
+                totalFrames: npc.totalFrames,
+                target: npc.chaseTarget || null,
+            },
+            items: worldItems.map(it => ({
+                id: it.id,
+                x: Math.round(it.x * 10) / 10,
+                y: Math.round(it.y * 10) / 10,
+                picked: it.picked,
+                dropped: !!it.dropped,
+            })),
+            health: {
+                picked: healthPickup.picked,
+            },
+        });
+    }
+    let netWorldTickCounter = 0;
+
+    function applyWorldStateFromHost(msg) {
+        // Apply NPC state
+        const npc = npcs[0];
+        if (npc && msg.npc) {
+            const prevState = npc.state;
+            npc.x = msg.npc.x;
+            npc.y = msg.npc.y;
+            npc.facingLeft = msg.npc.facingLeft;
+            npc.state = msg.npc.state;
+            npc.vigilance = msg.npc.vigilance;
+            npc.slideKind = msg.npc.slideKind || 'h';
+            npc.frame = msg.npc.frame;
+            npc.currentSprite = msg.npc.currentSprite;
+            npc.totalFrames = msg.npc.totalFrames;
+            npc.chaseTarget = msg.npc.target;
+            // State transition side-effects (sounds)
+            if (prevState !== 'glisse' && npc.state === 'glisse') {
+                startGlisseSound();
+            } else if (prevState === 'glisse' && npc.state !== 'glisse') {
+                stopGlisseSound();
+                if (npc.state === 'tombe') playSound('tombe');
+            }
+        }
+        // Items
+        if (msg.items) {
+            for (const incoming of msg.items) {
+                const entry = worldItems.find(w => w.id === incoming.id);
+                if (entry) {
+                    entry.x = incoming.x;
+                    entry.y = incoming.y;
+                    entry.picked = incoming.picked;
+                    entry.dropped = incoming.dropped;
+                }
+            }
+        }
+        // Health pickup
+        if (msg.health) {
+            healthPickup.picked = msg.health.picked;
+        }
+    }
+
+    function applyWorldEvent(msg) {
+        // One-shot events sent by the host
+        if (msg.event === 'gifle') {
+            playSound('gifle');
+        } else if (msg.event === 'gifle_remote') {
+            // The host's maitresse slapped THIS joiner.
+            player.gifleActive = true;
+            player.gifleTimer = 48;
+            player.health = Math.max(0, player.health - 1);
+            player.headBlink = 120;
+            player.frame = 0; player.animTimer = 0;
+            playSound('gifle');
+        } else if (msg.event === 'tombe') {
+            playSound('tombe');
+        } else if (msg.event === 'drop') {
+            playSound('drop');
+        }
+    }
+
+    // Kick off matchmaking when entering lobby
+    async function startMatchmaking() {
+        net.searchStatus = 'searching';
+        net.searchMessage = 'Recherche d\u2019une partie...';
+        // First, try to join an existing lobby
+        const joined = await tryJoinExistingLobby();
+        if (joined) {
+            net.searchStatus = 'connecting';
+            net.searchMessage = 'Connexion en cours...';
+            return;
+        }
+        // Otherwise, become a host
+        net.searchStatus = 'hosting';
+        net.searchMessage = 'En attente d\u2019un autre joueur...';
+        const hosted = await tryBecomeHost();
+        if (!hosted) {
+            net.searchStatus = 'error';
+            net.searchMessage = 'Impossible de cr\u00e9er une partie.';
+        }
+    }
+
+    function cleanupNet() {
+        try { if (net.conn) net.conn.close(); } catch (_) {}
+        try { if (net.peer) net.peer.destroy(); } catch (_) {}
+        net.peer = null;
+        net.conn = null;
+        net.isHost = false;
+        net.connected = false;
+        net.peerNickname = '';
+        net.searchStatus = 'idle';
+        net.searchMessage = '';
+    }
+
+    // ========== NICKNAME MODAL ==========
+    const nicknameModal = document.getElementById('nicknameModal');
+    const nicknameInput = document.getElementById('nicknameInput');
+    const nicknameError = document.getElementById('nicknameError');
+    const nicknameOk = document.getElementById('nicknameOk');
+
+    function openNicknameModal() {
+        nicknameModal.style.display = 'flex';
+        nicknameError.textContent = '';
+        nicknameInput.value = net.nickname || '';
+        setTimeout(() => nicknameInput.focus(), 50);
+    }
+    function closeNicknameModal() {
+        nicknameModal.style.display = 'none';
+    }
+    function submitNickname() {
+        const name = (nicknameInput.value || '').trim();
+        if (name.length < 2) {
+            nicknameError.textContent = 'Au moins 2 caract\u00e8res.';
+            return;
+        }
+        net.nickname = name;
+        closeNicknameModal();
+        // Go to lobby screen and start matchmaking
+        gameState.screen = 'lobby';
+        startMatchmaking();
+    }
+    nicknameOk.addEventListener('click', submitNickname);
+    nicknameInput.addEventListener('keydown', (e) => {
+        if (e.code === 'Enter') {
+            e.preventDefault();
+            submitNickname();
+        }
+        e.stopPropagation();
+    });
+
+    // ========== ITEMS ==========
+    const worldItems = [
+        { id: 'voiture', sprite: 'item_voiture', x: 720, y: 270, size: 38, picked: false,
+          spawnX: 720, spawnY: 270, respawnTimer: 0 },
+        { id: 'bille', sprite: 'item_bille', x: 50, y: 480, size: 38, picked: false,
+          spawnX: 50, spawnY: 480, respawnTimer: 0 },
+    ];
+    // Health pickup: separate from worldItems because it isn't held/thrown.
+    // Sprite 64x16: actual content is 2 frames of 16x16 side-by-side (rest is empty).
+    const healthPickup = {
+        x: 40, y: 165,
+        size: 36,                 // render size on screen
+        picked: false,
+        respawnTimer: 0,         // counts down while picked; respawns when 0
+        respawnDuration: 60 * 60, // 60s
+    };
+    // Exit arrow above the top-left door. Becomes animated yellow once 8+ points reached.
+    const exitArrow = {
+        x: 125, y: 70,
+        size: 56,
+        frame: 0,
+        animTimer: 0,
+    };
+    const inventory = {
+        item: null,           // current held/selected item id
+        owned: [],            // list of item ids Titeuf has picked up
+        showAnim: 0,          // slide-up animation progress (0 to 1)
+        showAnimActive: false,
+    };
+    function inventoryRemoveCurrent() {
+        if (!inventory.item) return;
+        const idx = inventory.owned.indexOf(inventory.item);
+        if (idx >= 0) inventory.owned.splice(idx, 1);
+        // Select next available item, or null if empty
+        if (inventory.owned.length > 0) {
+            inventory.item = inventory.owned[Math.min(idx, inventory.owned.length - 1)];
+        } else {
+            inventory.item = null;
+        }
+    }
+    // Thrown items in flight
+    const thrownItems = [];
+
+    // ========== NPCs ==========
+    const npcs = [
+        {
+            name: 'maitresse',
+            x: 385, y: 170,
+            spawnX: 385, spawnY: 170,
+            sprites: {
+                idle: 'maitresse_idle',
+                walk_h: 'maitresse_walk_h',
+                walk_down: 'maitresse_walk_down',
+                walk_up: 'maitresse_walk_up',
+                glisse: 'maitresse_glisse',
+                glisse_haut: 'maitresse_glisse_haut',
+                glisse_bas: 'maitresse_glisse_bas',
+                glisse_diag_haut: 'maitresse_glisse_diag_haut',
+                glisse_diag_bas: 'maitresse_glisse_diag_bas',
+                tombe: 'maitresse_tombe',
+                tombe_haut: 'maitresse_tombe_haut',
+                tombe_bas: 'maitresse_tombe_bas',
+                tombe_diag_haut: 'maitresse_tombe_diag_haut',
+                tombe_diag_bas: 'maitresse_tombe_diag_bas',
+                poursuit: 'maitresse_poursuit',
+                poursuit_bas: 'maitresse_poursuit_bas',
+                poursuit_haut: 'maitresse_poursuit_haut',
+                poursuit_diag_haut: 'maitresse_poursuit_diag_haut',
+                poursuit_diag_bas: 'maitresse_poursuit_diag_bas',
+                gifle: 'maitresse_gifle',
+            },
+            currentSprite: 'maitresse_idle',
+            cols: 4, idleFrames: 8, walkFrames: 6, totalFrames: 8,
+            cellW: 64, cellH: 64, scale: 1.8, fps: 6,
+            frame: 0, animTimer: 0, facingLeft: true, offsetY: 20,
+            speed: 1.2, baseSpeed: 1.2,
+            hitbox: { w: 30, h: 14, offsetY: 12 },
+            patrol: [
+                { x: 385, y: 170, wait: 180 },
+                { x: 385, y: 250 }, { x: 660, y: 250 }, { x: 660, y: 470 },
+                { x: 50, y: 470 }, { x: 50, y: 98 }, { x: 300, y: 98 },
+                { x: 300, y: 170 }, { x: 385, y: 170, wait: 180 },
+            ],
+            patrolIndex: 0, waitTimer: 180,
+            state: 'idle', // idle, walking, glisse, tombe, poursuit, gifle
+            vigilance: 'calm', vigilanceRadius: 140,
+            // Reaction state
+            slideDx: 0, slideDy: 0, slideLife: 0,
+            tombeTimer: 0, angrySpeedTimer: 0,
+            // Combo: count of items that hit during the current slide
+            comboCount: 0,
+            // Pathfinding state
+            path: null, pathIndex: 0, pathRecalcTimer: 0, pathTargetX: 0, pathTargetY: 0,
+            // Anti-stuck tracking
+            stuckTimer: 0, lastProgressX: 0, lastProgressY: 0, commitDir: null, commitTimer: 0,
+        },
+    ];
+
+    let images = {};
+    const sounds = {};
+    let lastTime = 0;
+
+    // Helper: play a sound (clones to allow overlapping playback)
+    function playSound(name, volume) {
+        const src = sounds[name];
+        if (!src) return;
+        const a = src.cloneNode();
+        a.volume = volume !== undefined ? volume : 1;
+        a.play().catch(() => {}); // ignore autoplay policy errors
+    }
+
+    // ========== LOADING ==========
+    function loadImages() {
+        return new Promise((resolve) => {
+            const sources = {
+                map: 'images/salle_classe.png',
+                idle: 'images/titeuf_regarde_droite_gauche.png',
+                idle_down: 'images/titeuf_regarde_bas.png',
+                idle_up: 'images/titeuf_regarde_haut.png',
+                idle_diag_haut: 'images/titeuf_regarde_diag_haut.png',
+                idle_diag_bas: 'images/titeuf_regarde_diag_bas.png',
+                run: 'images/titeuf_court_horizontale.png',
+                diag: 'images/titeuf_court_diag.png',
+                diag_bas: 'images/titeuf_court_diag_bas.png',
+                run_down: 'images/titeuf_court_bas.png',
+                run_up: 'images/titeuf_court_haut.png',
+                panique: 'images/titeuf_panique.png',
+                panique_haut: 'images/titeuf_panique_haut.png',
+                panique_bas: 'images/titeuf_panique_bas.png',
+                panique_diag_haut: 'images/titeuf_panique_diag_haut.png',
+                panique_diag_bas: 'images/titeuf_panique_diag_bas.png',
+                maitresse_idle: 'images/maitresse_idle.png',
+                maitresse_walk_h: 'images/maitresse_marche_horizontal.png',
+                maitresse_walk_down: 'images/maitresse_marche_bas.png',
+                maitresse_walk_up: 'images/maitresse_marche_haut.png',
+                hud_tete: 'images/titeuf_tete.png',
+                hud_tete_2hp: 'images/titeuf_2hp.png',
+                hud_tete_1hp: 'images/titeuf_1hp.png',
+                hud_vie: 'images/point_de_vie.png',
+                hud_coupe: 'images/coupe.png',
+                hud_button_a: 'images/boutton.png',
+                manu_idle_side: 'images/manu_regarde_droite_gauche_single.png',
+                manu_idle_down: 'images/manu_regarde_bas.png',
+                manu_idle_up: 'images/manu_regarde_haut.png',
+                item_voiture: 'images/voiture.png',
+                item_bille: 'images/bille.png',
+                item_hp: 'images/item_hp.png',
+                fleche: 'images/fleche.png',
+                fleche_jaune: 'images/fleche_jaune.png',
+                menu_bg: 'images/menu.png',
+                defi_bg: 'images/defis01.png',
+                maitresse_glisse: 'images/maitresse_glisse.png',
+                maitresse_glisse_haut: 'images/maitresse_glisse_haut.png',
+                maitresse_glisse_bas: 'images/maitresse_glisse_bas.png',
+                maitresse_glisse_diag_haut: 'images/maitresse_glisse_diag_haut.png',
+                maitresse_glisse_diag_bas: 'images/maitresse_glisse_diag_bas.png',
+                maitresse_tombe: 'images/maitresse_tombe.png',
+                maitresse_tombe_haut: 'images/maitresse_tombe_haut.png',
+                maitresse_tombe_bas: 'images/maitresse_tombe_bas.png',
+                maitresse_tombe_diag_haut: 'images/maitresse_tombe_diag_haut.png',
+                maitresse_tombe_diag_bas: 'images/maitresse_tombe_diag_bas.png',
+                maitresse_poursuit: 'images/maitresse_poursuit.png',
+                maitresse_poursuit_bas: 'images/maitresse_poursuit_bas.png',
+                maitresse_poursuit_haut: 'images/maitresse_poursuit_haut.png',
+                maitresse_poursuit_diag_haut: 'images/maitresse_poursuit_diag_haut.png',
+                maitresse_poursuit_diag_bas: 'images/maitresse_poursuit_diag_bas.png',
+                maitresse_gifle: 'images/maitresse_gifle.png',
+                titeuf_gifle: 'images/titeuf_gifle.png',
+            };
+            const total = Object.keys(sources).length;
+            let count = 0;
+            const bar = document.getElementById('loadBar');
+
+            for (const [key, src] of Object.entries(sources)) {
+                const img = new Image();
+                img.onload = () => {
+                    count++;
+                    bar.style.width = (count / total * 100) + '%';
+                    if (count === total) {
+                        setTimeout(() => {
+                            document.getElementById('loading').style.opacity = '0';
+                            setTimeout(() => {
+                                document.getElementById('loading').style.display = 'none';
+                                resolve();
+                            }, 500);
+                        }, 300);
+                    }
+                };
+                img.src = src;
+                images[key] = img;
+            }
+        });
+    }
+
+    function loadSounds() {
+        const sources = {
+            gifle: 'son/gifle.mp3',
+            drop: 'son/drop.mp3',
+            loot: 'son/loot.mp3',
+            glisse: 'son/glisse.mp3',
+            tombe: 'son/tombe.mp3',
+            music_classe: 'son/classe.mp3',
+        };
+        for (const [key, src] of Object.entries(sources)) {
+            const a = new Audio();
+            a.src = src;
+            a.preload = 'auto';
+            sounds[key] = a;
+        }
+        // Music: loop forever, lower volume
+        sounds.music_classe.loop = true;
+        sounds.music_classe.volume = 0.4;
+        // Glisse sound loops while NPC is sliding; stopped manually on transition.
+        sounds.glisse.loop = true;
+    }
+
+    // Background music starts on first user interaction (browser autoplay policy).
+    let musicStarted = false;
+    function startMusic() {
+        if (musicStarted) return;
+        const m = sounds.music_classe;
+        if (!m) return;
+        m.play().then(() => { musicStarted = true; }).catch(() => {});
+    }
+
+    // Looping glisse sound helpers
+    function startGlisseSound() {
+        const a = sounds.glisse;
+        if (!a) return;
+        try {
+            a.currentTime = 0;
+            a.play().catch(() => {});
+        } catch (_) {}
+    }
+    function stopGlisseSound() {
+        const a = sounds.glisse;
+        if (!a) return;
+        try { a.pause(); a.currentTime = 0; } catch (_) {}
+    }
+
+    // ========== INPUT ==========
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'F11' || e.code === 'F12' || e.code === 'F5') return;
+        // Debug: press C to log Titeuf's current world coordinates
+        if (e.code === 'KeyC' && !keys['KeyC']) {
+            console.log(`Titeuf coords: { x: ${Math.round(player.x)}, y: ${Math.round(player.y)} }`);
+        }
+        keys[e.code] = true;
+        startMusic(); // first interaction unlocks audio
+        e.preventDefault();
+    });
+    window.addEventListener('keyup', (e) => {
+        if (e.code === 'F11' || e.code === 'F12' || e.code === 'F5') return;
+        keys[e.code] = false;
+        e.preventDefault();
+    });
+    // Also start on click and gamepad button press
+    window.addEventListener('mousedown', startMusic);
+    window.addEventListener('touchstart', startMusic);
+
+    // Gamepad state
+    const gamepad = {
+        lx: 0, ly: 0,
+        dpad: { up: false, down: false, left: false, right: false },
+        a: false, aPrev: false,
+        lb: false, lbPrev: false,
+        rb: false, rbPrev: false,
+    };
+    const DEADZONE = 0.25;
+
+    function pollGamepad() {
+        const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+        for (const gp of gps) {
+            if (!gp) continue;
+            // Left stick: axes 0 (X) and 1 (Y)
+            let lx = gp.axes[0] || 0;
+            let ly = gp.axes[1] || 0;
+            if (Math.abs(lx) < DEADZONE) lx = 0;
+            if (Math.abs(ly) < DEADZONE) ly = 0;
+            gamepad.lx = lx;
+            gamepad.ly = ly;
+            // D-pad: buttons 12=up, 13=down, 14=left, 15=right
+            gamepad.dpad.up = gp.buttons[12] && gp.buttons[12].pressed;
+            gamepad.dpad.down = gp.buttons[13] && gp.buttons[13].pressed;
+            gamepad.dpad.left = gp.buttons[14] && gp.buttons[14].pressed;
+            gamepad.dpad.right = gp.buttons[15] && gp.buttons[15].pressed;
+            // A button (Xbox: button 0)
+            gamepad.aPrev = gamepad.a;
+            gamepad.a = gp.buttons[0] && gp.buttons[0].pressed;
+            // Bumpers: LB = button 4, RB = button 5 (standard mapping)
+            gamepad.lbPrev = gamepad.lb;
+            gamepad.rbPrev = gamepad.rb;
+            gamepad.lb = gp.buttons[4] && gp.buttons[4].pressed;
+            gamepad.rb = gp.buttons[5] && gp.buttons[5].pressed;
+            // Any button press / stick movement counts as user interaction (unlocks audio)
+            if (!musicStarted && (gamepad.a || gamepad.lb || gamepad.rb ||
+                gamepad.dpad.up || gamepad.dpad.down || gamepad.dpad.left || gamepad.dpad.right ||
+                lx !== 0 || ly !== 0)) {
+                startMusic();
+            }
+            return;
+        }
+        gamepad.lx = 0;
+        gamepad.ly = 0;
+        gamepad.dpad.up = gamepad.dpad.down = gamepad.dpad.left = gamepad.dpad.right = false;
+    }
+
+    function getInput() {
+        pollGamepad();
+        let dx = 0, dy = 0;
+        // Keyboard
+        if (keys['ArrowLeft'] || keys['KeyQ']) dx -= 1;
+        if (keys['ArrowRight'] || keys['KeyD']) dx += 1;
+        if (keys['ArrowUp'] || keys['KeyZ']) dy -= 1;
+        if (keys['ArrowDown'] || keys['KeyS']) dy += 1;
+        // D-pad
+        if (gamepad.dpad.left) dx -= 1;
+        if (gamepad.dpad.right) dx += 1;
+        if (gamepad.dpad.up) dy -= 1;
+        if (gamepad.dpad.down) dy += 1;
+        // Clamp
+        dx = Math.max(-1, Math.min(1, dx));
+        dy = Math.max(-1, Math.min(1, dy));
+        // Stick override if active
+        if (gamepad.lx !== 0 || gamepad.ly !== 0) {
+            dx = gamepad.lx;
+            dy = gamepad.ly;
+        }
+        // Normalize keyboard/dpad diagonal (stick is already analog)
+        if (gamepad.lx === 0 && gamepad.ly === 0 && dx !== 0 && dy !== 0) {
+            const inv = 1 / Math.SQRT2;
+            dx *= inv; dy *= inv;
+        }
+        return { dx, dy };
+    }
+
+    function getRawInput() {
+        let dx = (keys['ArrowLeft'] || keys['KeyQ'] ? -1 : 0) + (keys['ArrowRight'] || keys['KeyD'] ? 1 : 0);
+        let dy = (keys['ArrowUp'] || keys['KeyZ'] ? -1 : 0) + (keys['ArrowDown'] || keys['KeyS'] ? 1 : 0);
+        // D-pad raw
+        if (gamepad.dpad.left) dx -= 1;
+        if (gamepad.dpad.right) dx += 1;
+        if (gamepad.dpad.up) dy -= 1;
+        if (gamepad.dpad.down) dy += 1;
+        dx = Math.max(-1, Math.min(1, dx));
+        dy = Math.max(-1, Math.min(1, dy));
+        // Stick raw direction override
+        if (gamepad.lx !== 0 || gamepad.ly !== 0) {
+            dx = gamepad.lx > 0 ? 1 : gamepad.lx < 0 ? -1 : 0;
+            dy = gamepad.ly > 0 ? 1 : gamepad.ly < 0 ? -1 : 0;
+        }
+        return { dx, dy };
+    }
+
+    // ========== COLLISION ==========
+    function playerHitbox(px, py) {
+        return {
+            x: px - CONFIG.PLAYER_HITBOX.w / 2,
+            y: py + CONFIG.PLAYER_HITBOX.offsetY - CONFIG.PLAYER_HITBOX.h / 2,
+            w: CONFIG.PLAYER_HITBOX.w,
+            h: CONFIG.PLAYER_HITBOX.h,
+        };
+    }
+    function rectsOverlap(a, b) {
+        return a.x < b.x + b.w && a.x + a.w > b.x &&
+               a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+    // Pick a sprite kind for a slide direction (used for both glisse and tombe variants).
+    // Same threshold logic as poursuit_diag selection: ratio Y/X.
+    function slideKindFor(dx, dy) {
+        const ax = Math.abs(dx), ay = Math.abs(dy);
+        const ratio = ax === 0 ? Infinity : ay / ax;
+        if (ratio > 2.5) return dy < 0 ? 'haut' : 'bas';
+        if (ratio > 0.4) return dy < 0 ? 'diag_haut' : 'diag_bas';
+        return 'h';
+    }
+    function glisseSpriteFor(npc, kind) {
+        switch (kind) {
+            case 'haut': return { sprite: npc.sprites.glisse_haut, frames: 3 };
+            case 'bas': return { sprite: npc.sprites.glisse_bas, frames: 3 };
+            case 'diag_haut': return { sprite: npc.sprites.glisse_diag_haut, frames: 2 };
+            case 'diag_bas': return { sprite: npc.sprites.glisse_diag_bas, frames: 3 };
+            default: return { sprite: npc.sprites.glisse, frames: 4 };
+        }
+    }
+    function tombeSpriteFor(npc, kind) {
+        switch (kind) {
+            case 'haut': return npc.sprites.tombe_haut;
+            case 'bas': return npc.sprites.tombe_bas;
+            case 'diag_haut': return npc.sprites.tombe_diag_haut;
+            case 'diag_bas': return npc.sprites.tombe_diag_bas;
+            default: return npc.sprites.tombe;
+        }
+    }
+    function canMove(nx, ny) {
+        const hb = playerHitbox(nx, ny);
+        for (const c of COLLIDERS) {
+            if (rectsOverlap(hb, c)) return false;
+        }
+        return true;
+    }
+
+    // ========== DETERMINE ANIMATION ==========
+    function getIdleAnim() {
+        switch (player.lastDirection) {
+            case 'down': return 'idle_down';
+            case 'up': return 'idle_up';
+            case 'diag_haut': return 'idle_diag_haut';
+            case 'diag_bas': return 'idle_diag_bas';
+            default: return 'idle'; // side
+        }
+    }
+
+    function getAnimState(raw) {
+        // When chased, Titeuf is in panic mode. Pick the right panique sprite per direction
+        // (or by lastDirection when idle, so a player facing up keeps panique_haut).
+        if (player.panique) {
+            if (raw.dx === 0 && raw.dy === 0) {
+                switch (player.lastDirection) {
+                    case 'down': return 'panique_bas';
+                    case 'up': return 'panique_haut';
+                    case 'diag_haut': return 'panique_diag_haut';
+                    case 'diag_bas': return 'panique_diag_bas';
+                    default: return 'panique'; // side
+                }
+            }
+            if (raw.dy < 0 && raw.dx !== 0) return 'panique_diag_haut'; // up + horizontal
+            if (raw.dy > 0 && raw.dx !== 0) return 'panique_diag_bas';  // down + horizontal
+            if (raw.dy < 0 && raw.dx === 0) return 'panique_haut';      // pure up
+            if (raw.dy > 0 && raw.dx === 0) return 'panique_bas';       // pure down
+            return 'panique';                                           // pure horizontal
+        }
+        if (raw.dx === 0 && raw.dy === 0) return getIdleAnim();
+        if (raw.dy < 0 && raw.dx !== 0) return 'diag';       // up + horizontal
+        if (raw.dy > 0 && raw.dx !== 0) return 'diag_bas';   // down + horizontal
+        if (raw.dy > 0 && raw.dx === 0) return 'run_down';   // pure down
+        if (raw.dy < 0 && raw.dx === 0) return 'run_up';     // pure up
+        return 'run'; // pure horizontal
+    }
+
+    // Multi: returns the entity object the NPC should chase.
+    // - Solo: always the local player.
+    // - Multi host: determines closest visible target (player or remotePlayer),
+    //   sticks to npc.chaseTarget once set until target is no longer visible.
+    // - Multi joiner: reads npc.chaseTarget set by host (inverted local/remote).
+    function getChaseTarget(npc) {
+        if (gameState.mode !== 'multi') return player;
+        const tag = npc.chaseTarget || 'local';
+        if (net.isHost) {
+            return tag === 'remote' ? remotePlayer : player;
+        } else {
+            // On joiner, host's "local" target == this joiner's remotePlayer
+            return tag === 'remote' ? player : remotePlayer;
+        }
+    }
+    // Host-only: choose/refresh the chase target based on visibility & distance.
+    function updateChaseTarget(npc) {
+        if (gameState.mode !== 'multi' || !net.isHost) return;
+        if (!remotePlayer.active) { npc.chaseTarget = 'local'; return; }
+        // If we already have a target and it's still on-screen (within reasonable range), keep it
+        const currentTag = npc.chaseTarget;
+        const current = currentTag === 'remote' ? remotePlayer : player;
+        const dCur = Math.hypot(current.x - npc.x, current.y - npc.y);
+        if (currentTag && dCur < 350) return; // sticky
+        // Otherwise pick closest
+        const dL = Math.hypot(player.x - npc.x, player.y - npc.y);
+        const dR = Math.hypot(remotePlayer.x - npc.x, remotePlayer.y - npc.y);
+        npc.chaseTarget = dR < dL ? 'remote' : 'local';
+    }
+    function update(dt) {
+        const input = getInput();
+        const raw = getRawInput();
+
+        // Detect panique: any NPC currently chasing THIS player triggers panic mode.
+        // In multi, the maitresse only panics the player she's actually chasing.
+        let chased = false;
+        for (const n of npcs) {
+            if (n.state !== 'poursuit') continue;
+            if (gameState.mode === 'multi') {
+                // Only panic if I'm the target
+                const target = getChaseTarget(n);
+                if (target === player) { chased = true; break; }
+            } else {
+                chased = true; break;
+            }
+        }
+        player.panique = chased;
+
+        // Detect A press (panique mash). Same edge detection as throw button.
+        const aPressedNow = (keys['KeyA'] && !keys['_prevAPanique']) || (gamepad.a && !gamepad.aPrev);
+        keys['_prevAPanique'] = keys['KeyA'];
+
+        // Track recent A presses in a sliding window (last 60 frames = 1 second).
+        // mashCount reflects the actual current rhythm: if the player slows down,
+        // it drops immediately as old presses fall out of the window.
+        if (!player.mashHistory) player.mashHistory = [];
+        if (aPressedNow) player.mashHistory.push(0); // 0 = age in frames
+        // Age all entries and remove those older than 60 frames
+        for (let i = 0; i < player.mashHistory.length; i++) player.mashHistory[i]++;
+        while (player.mashHistory.length > 0 && player.mashHistory[0] > 60) {
+            player.mashHistory.shift();
+        }
+        player.mashCount = Math.min(8, player.mashHistory.length);
+
+        // Speed: in panique, base speed is halved without mashing.
+        // Mashing brings it back up and significantly beyond.
+        // mash 0 -> 0.5x (slow, caught fast)
+        // mash 4 -> ~1.35x
+        // mash 8 -> 2.2x (clearly outruns maitresse, escape in ~1s)
+        let speed = CONFIG.PLAYER_SPEED;
+        if (player.panique) {
+            const mashFactor = 0.5 + player.mashCount * 0.2125; // 0.5 -> 2.2
+            speed = CONFIG.PLAYER_SPEED * mashFactor;
+        }
+
+        player.moving = (input.dx !== 0 || input.dy !== 0);
+
+        // Track last direction for idle
+        if (player.moving) {
+            if (raw.dy > 0 && raw.dx === 0) player.lastDirection = 'down';
+            else if (raw.dy < 0 && raw.dx === 0) player.lastDirection = 'up';
+            else if (raw.dy < 0 && raw.dx !== 0) player.lastDirection = 'diag_haut';
+            else if (raw.dy > 0 && raw.dx !== 0) player.lastDirection = 'diag_bas';
+            else player.lastDirection = 'side';
+        }
+
+        // Player gifle state (must be checked BEFORE normal animation)
+        if (player.gifleActive) {
+            player.gifleTimer--;
+            player.currentAnim = 'gifle';
+            player.animTimer += 5 / 60;
+            if (player.animTimer >= 1) {
+                player.animTimer = 0;
+                if (player.frame < 2) {
+                    player.frame++;
+                }
+                // Stay on last frame (frame 2)
+            }
+            if (player.gifleTimer <= 0) {
+                player.gifleActive = false;
+                player.currentAnim = 'idle';
+                player.frame = 0;
+                player.animTimer = 0;
+            }
+        } else {
+            // Animation state (normal)
+            const newAnim = getAnimState(raw);
+            if (newAnim !== player.currentAnim) {
+                player.currentAnim = newAnim;
+                player.frame = 0;
+                player.animTimer = 0;
+            }
+
+            if (player.moving) {
+                if (raw.dx < 0) player.facingLeft = true;
+                else if (raw.dx > 0) player.facingLeft = false;
+
+                const nx = player.x + input.dx * speed;
+                const ny = player.y + input.dy * speed;
+                if (canMove(nx, ny)) { player.x = nx; player.y = ny; }
+                else if (canMove(nx, player.y)) { player.x = nx; }
+                else if (canMove(player.x, ny)) { player.y = ny; }
+
+                player.x = Math.max(20, Math.min(CONFIG.MAP_W - 20, player.x));
+                player.y = Math.max(230 * S + 20, Math.min(CONFIG.MAP_H - 20, player.y));
+            }
+
+            // Animation timing
+            if (player.currentAnim && player.currentAnim.startsWith('panique')) {
+                // Fixed 14 fps for all panique animations
+                player.animTimer += 14 / 60;
+            } else if (player.moving) {
+                const isRunning = player.currentAnim === 'run' || player.currentAnim === 'diag' || player.currentAnim === 'diag_bas' || player.currentAnim === 'run_down' || player.currentAnim === 'run_up';
+                const runMultiplier = isRunning ? 2.5 : 1.5;
+                player.animTimer += CONFIG.ANIM_SPEED * runMultiplier;
+            } else {
+                player.animTimer += 9 / 60;
+            }
+
+            if (player.animTimer >= 1) {
+                player.animTimer = 0;
+                player.frame = (player.frame + 1) % ANIM_FRAMES[player.currentAnim];
+            }
+        }
+
+        if (player.headBlink > 0) player.headBlink--;
+        if (player.scorePopup) {
+            player.scorePopup.timer--;
+            if (player.scorePopup.timer <= 0) player.scorePopup = null;
+        }
+
+        // Camera follows Titeuf exactly. The render-side clamping keeps it inside
+        // the map bounds, so near a border Titeuf naturally drifts off-center.
+        camera.x = player.x;
+        camera.y = player.y;
+
+        // Update NPCs
+        // In multi-mode, only the host simulates NPCs. The joiner just animates
+        // frames based on the host's broadcasted state.
+        const skipNpcSim = gameState.mode === 'multi' && !net.isHost;
+        if (skipNpcSim) {
+            for (const npc of npcs) {
+                if (!npc.patrol) continue;
+                // Just advance animation frame
+                npc.animTimer++;
+                if (npc.animTimer >= 60 / (npc.fps || 6)) {
+                    npc.animTimer = 0;
+                    npc.frame++;
+                    const maxF = npc.totalFrames || 1;
+                    if (npc.state === 'tombe') {
+                        if (npc.frame >= 5) npc.frame = 5; // freeze at last
+                    } else if (npc.frame >= maxF) {
+                        npc.frame = 0;
+                    }
+                }
+            }
+        } else {
+        for (const npc of npcs) {
+            if (!npc.patrol) {
+                // Simple idle NPC - handle idle cycle if present
+                if (npc.idleCycle) {
+                    npc.idleCycleTimer--;
+                    if (npc.idleCycleTimer <= 0) {
+                        npc.idleCycleIndex = (npc.idleCycleIndex + 1) % npc.idleCycle.length;
+                        const cycle = npc.idleCycle[npc.idleCycleIndex];
+                        npc.currentSprite = npc.sprites[cycle.sprite];
+                        npc.cols = cycle.cols;
+                        npc.cellW = cycle.cellW;
+                        npc.cellH = cycle.cellH;
+                        npc.totalFrames = cycle.totalFrames;
+                        npc.idleCycleTimer = cycle.duration;
+                        npc.frame = 0;
+                        npc.animTimer = 0;
+                    }
+                }
+                npc.animTimer += npc.fps / 60;
+                if (npc.animTimer >= 1) {
+                    npc.animTimer = 0;
+                    npc.frame = (npc.frame + 1) % npc.totalFrames;
+                }
+                continue;
+            }
+
+            // ========== MAITRESSE STATE MACHINE ==========
+            // Angry timer (7 seconds = 420 frames)
+            if (npc.angrySpeedTimer > 0) {
+                npc.angrySpeedTimer--;
+                if (npc.angrySpeedTimer <= 0) {
+                    npc.speed = npc.baseSpeed;
+                    npc.vigilance = 'calm';
+                    // Find nearest patrol waypoint to resume patrol
+                    if (npc.state === 'walking' || npc.state === 'poursuit') {
+                        let nearestIdx = 0;
+                        let nearestDist = Infinity;
+                        for (let i = 0; i < npc.patrol.length; i++) {
+                            const wp = npc.patrol[i];
+                            const d = Math.sqrt((wp.x - npc.x) ** 2 + (wp.y - npc.y) ** 2);
+                            if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+                        }
+                        npc.patrolIndex = nearestIdx;
+                        npc.state = 'walking';
+                        npc.frame = 0; npc.animTimer = 0;
+                        npc.fps = 6;
+                    }
+                }
+            }
+
+            // Check if maitresse is "on screen" — used to decide when she gives up chasing.
+            // In multi: she stays "on screen" as long as she's near any player.
+            const halfViewW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
+            const halfViewH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
+            const margin = npc.angrySpeedTimer > 0 ? 30 : 0;
+            let maitresseOnScreen;
+            if (gameState.mode === 'multi' && remotePlayer.active) {
+                // Visible if near either player
+                const near = (px, py) => Math.abs(npc.x - px) < halfViewW + margin && Math.abs(npc.y - py) < halfViewH + margin;
+                maitresseOnScreen = near(player.x, player.y) || near(remotePlayer.x, remotePlayer.y);
+            } else {
+                const mOnScreenX = Math.abs(npc.x - camera.x) < halfViewW + margin;
+                const mOnScreenY = Math.abs(npc.y - camera.y) < halfViewH + margin;
+                maitresseOnScreen = mOnScreenX && mOnScreenY;
+            }
+
+            // Helper: try to move NPC using A* pathfinding, with wall-following fallback.
+            // Path is recomputed periodically or when target moved significantly.
+            function moveNpcToward(npc, targetX, targetY, moveSpeed) {
+                const mdx = targetX - npc.x;
+                const mdy = targetY - npc.y;
+                const mdist = Math.sqrt(mdx * mdx + mdy * mdy);
+                if (mdist < 3) return;
+
+                function npcCanMove(x, y) {
+                    const hb = { x: x - npc.hitbox.w/2, y: y + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
+                    for (const c of COLLIDERS) { if (rectsOverlap(hb, c)) return false; }
+                    return true;
+                }
+
+                // ===== Anti-stuck progress tracker =====
+                // Measure how far we've travelled since last "progress check".
+                if (npc.lastProgressX === 0 && npc.lastProgressY === 0) {
+                    npc.lastProgressX = npc.x; npc.lastProgressY = npc.y;
+                }
+                const progressDist = Math.hypot(npc.x - npc.lastProgressX, npc.y - npc.lastProgressY);
+                npc.stuckTimer++;
+                if (progressDist > 18 || npc.stuckTimer > 20) {
+                    // Either we moved meaningfully, or it's been long enough to reset measurement
+                    if (progressDist < 8 && npc.stuckTimer > 20) {
+                        // STUCK: not enough progress in 20 frames → engage commit mode
+                        if (!npc.commitDir) {
+                            // Pick a side to commit to (orthogonal to target direction)
+                            // Prefer the side that has more open space to move in
+                            const baseA = Math.atan2(mdy, mdx);
+                            let bestSide = 1, bestSpace = 0;
+                            for (const s of [-1, 1]) {
+                                const a = baseA + s * Math.PI / 2;
+                                let openSpace = 0;
+                                for (let d = moveSpeed; d <= 60; d += 10) {
+                                    if (npcCanMove(npc.x + Math.cos(a) * d, npc.y + Math.sin(a) * d)) {
+                                        openSpace = d;
+                                    } else break;
+                                }
+                                if (openSpace > bestSpace) { bestSpace = openSpace; bestSide = s; }
+                            }
+                            npc.commitDir = bestSide;
+                            npc.commitTimer = 30; // commit for 0.5s
+                            // Invalidate path - we'll move sideways without A*
+                            npc.path = null;
+                        }
+                    }
+                    npc.lastProgressX = npc.x; npc.lastProgressY = npc.y;
+                    npc.stuckTimer = 0;
+                }
+
+                // ===== Commit mode: forced sideways movement to escape corner =====
+                if (npc.commitTimer > 0 && npc.commitDir) {
+                    npc.commitTimer--;
+                    const baseA = Math.atan2(mdy, mdx);
+                    // Try perpendicular first, then slightly bent toward target
+                    for (const off of [Math.PI / 2, Math.PI / 3, 5 * Math.PI / 12]) {
+                        const a = baseA + npc.commitDir * off;
+                        const nx = npc.x + Math.cos(a) * moveSpeed;
+                        const ny = npc.y + Math.sin(a) * moveSpeed;
+                        if (npcCanMove(nx, ny)) {
+                            npc.x = nx; npc.y = ny;
+                            return;
+                        }
+                    }
+                    // Even commit direction is blocked → cancel commit, fall through to normal logic
+                    npc.commitTimer = 0;
+                    npc.commitDir = null;
+                }
+
+                // ===== Normal A* pathfinding =====
+                const targetMoved = Math.hypot(targetX - npc.pathTargetX, targetY - npc.pathTargetY);
+                const needRecompute = !npc.path || npc.pathRecalcTimer <= 0 || targetMoved > 50;
+                if (needRecompute) {
+                    const raw = findPath(npc.x, npc.y, targetX, targetY);
+                    npc.path = raw ? smoothPath(raw, npc.hitbox) : null;
+                    npc.pathIndex = 0;
+                    npc.pathRecalcTimer = 45; // ~0.75s at 60fps (less frequent recompute = more stable)
+                    npc.pathTargetX = targetX;
+                    npc.pathTargetY = targetY;
+                }
+                npc.pathRecalcTimer--;
+
+                if (npc.path && npc.path.length > 0) {
+                    while (npc.pathIndex < npc.path.length - 1) {
+                        const wp = npc.path[npc.pathIndex];
+                        if (Math.hypot(wp.x - npc.x, wp.y - npc.y) < moveSpeed * 1.5) {
+                            npc.pathIndex++;
+                        } else break;
+                    }
+                    const wp = npc.path[npc.pathIndex];
+                    const wdx = wp.x - npc.x, wdy = wp.y - npc.y;
+                    const wdist = Math.hypot(wdx, wdy);
+                    if (wdist > 0.1) {
+                        const ang = Math.atan2(wdy, wdx);
+                        const nx = npc.x + Math.cos(ang) * moveSpeed;
+                        const ny = npc.y + Math.sin(ang) * moveSpeed;
+                        if (npcCanMove(nx, ny)) {
+                            npc.x = nx; npc.y = ny;
+                            return;
+                        }
+                        npc.pathRecalcTimer = 0;
+                    }
+                }
+
+                // ===== Fallback: direct + angled =====
+                const baseAngle = Math.atan2(mdy, mdx);
+                const directNx = npc.x + Math.cos(baseAngle) * moveSpeed;
+                const directNy = npc.y + Math.sin(baseAngle) * moveSpeed;
+                if (npcCanMove(directNx, directNy)) {
+                    npc.x = directNx; npc.y = directNy;
+                    return;
+                }
+                for (const off of [Math.PI/4, Math.PI/2, 3*Math.PI/4]) {
+                    for (const side of [1, -1]) {
+                        const a = baseAngle + side * off;
+                        const nx = npc.x + Math.cos(a) * moveSpeed;
+                        const ny = npc.y + Math.sin(a) * moveSpeed;
+                        if (npcCanMove(nx, ny)) {
+                            npc.x = nx; npc.y = ny;
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Helper: find nearest patrol waypoint
+            function findNearestWaypoint() {
+                let nearestIdx = 0, nearestDist = Infinity;
+                for (let i = 0; i < npc.patrol.length; i++) {
+                    const wp = npc.patrol[i];
+                    const d = Math.sqrt((wp.x - npc.x) ** 2 + (wp.y - npc.y) ** 2);
+                    if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+                }
+                npc.patrolIndex = nearestIdx;
+            }
+
+            // Helper: switch to walking patrol
+            function resumePatrol(fast) {
+                findNearestWaypoint();
+                npc.state = 'walking';
+                npc.speed = fast ? npc.baseSpeed * 2.5 : npc.baseSpeed;
+                npc.frame = 0; npc.animTimer = 0; npc.fps = 6;
+                // Force fresh A* computation for the new patrol leg
+                npc.path = null; npc.pathRecalcTimer = 0;
+                npc._patrolStuck = 0;
+            }
+
+            if (npc.state === 'glisse') {
+                const gInfo = glisseSpriteFor(npc, npc.slideKind || 'h');
+                npc.currentSprite = gInfo.sprite;
+                npc.totalFrames = gInfo.frames;
+                npc.fps = 10;
+                npc.slideLife--;
+                const gx = npc.x + npc.slideDx;
+                const gy = npc.y + npc.slideDy;
+                const ghb = { x: gx - npc.hitbox.w/2, y: gy + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
+                let gBlocked = false;
+                for (const c of COLLIDERS) { if (rectsOverlap(ghb, c)) { gBlocked = true; break; } }
+                if (!gBlocked) { npc.x = gx; npc.y = gy; }
+                else { npc.slideLife = 0; }
+                if (npc.slideLife <= 0) {
+                    npc.state = 'tombe';
+                    npc.currentSprite = tombeSpriteFor(npc, npc.slideKind || 'h');
+                    npc.totalFrames = 6;
+                    npc.fps = 8;
+                    npc.frame = 0; npc.animTimer = 0;
+                    npc.tombeTimer = 180;
+                    stopGlisseSound();
+                    playSound('tombe');
+                    // Award points based on combo. combo=0 means it was a passive slip
+                    // on a dropped item (no Titeuf throw chained), so no score awarded.
+                    //   1 throw  -> +2
+                    //   2 throws -> +16 (×8 per item)
+                    //   N throws -> N * 8 if N >= 2
+                    const n = npc.comboCount || 0;
+                    if (n > 0) {
+                        const pts = n === 1 ? 2 : n * 8;
+                        player.score += pts;
+                        player.scorePopup = { text: '+' + pts, timer: 180 }; // 3s
+                    }
+                    npc.comboCount = 0;
+                }
+            } else if (npc.state === 'tombe') {
+                npc.currentSprite = tombeSpriteFor(npc, npc.slideKind || 'h');
+                npc.totalFrames = 6;
+                npc.fps = 8;
+                // Freeze on last filled frame (sprite sheets have 6 filled frames + 2 empty)
+                if (npc.frame >= 5) npc.frame = 5;
+                npc.tombeTimer--;
+                if (npc.tombeTimer <= 0) {
+                    npc.angrySpeedTimer = 420; // 7 seconds angry
+                    npc.vigilance = 'angry';
+                    if (maitresseOnScreen) {
+                        npc.state = 'poursuit';
+                    } else {
+                        resumePatrol(true);
+                    }
+                    npc.slideKind = 'h'; // reset for next time
+                    npc.frame = 0; npc.animTimer = 0;
+                    npc.fps = 6;
+                }
+            } else if (npc.state === 'poursuit') {
+                // Multi: refresh chase target sticky logic
+                updateChaseTarget(npc);
+                const target = getChaseTarget(npc);
+                const pdx = target.x - npc.x;
+                const pdy = target.y - npc.y;
+                const pdist = Math.sqrt(pdx * pdx + pdy * pdy);
+
+                npc.totalFrames = 4; npc.fps = 12;
+                npc.vigilance = 'angry';
+
+                // Move toward target with obstacle avoidance, then derive sprite from
+                // the ACTUAL movement (so when going around an obstacle, the horizontal
+                // poursuit sprite plays during the longe-phase).
+                const pSpeed = npc.baseSpeed * 3.7;
+                const beforeX = npc.x, beforeY = npc.y;
+                moveNpcToward(npc, target.x, target.y, pSpeed);
+                const realDx = npc.x - beforeX;
+                const realDy = npc.y - beforeY;
+                const realLen = Math.sqrt(realDx * realDx + realDy * realDy);
+
+                if (realLen < 0.1) {
+                    // No movement: keep current sprite, facing based on target direction
+                    npc.facingLeft = pdx < 0;
+                } else {
+                    const absRdx = Math.abs(realDx);
+                    const absRdy = Math.abs(realDy);
+                    const ratio = absRdx === 0 ? Infinity : absRdy / absRdx;
+                    if (ratio > 2.5) {
+                        npc.currentSprite = realDy > 0 ? npc.sprites.poursuit_bas : npc.sprites.poursuit_haut;
+                    } else if (ratio > 0.4) {
+                        npc.currentSprite = realDy > 0 ? npc.sprites.poursuit_diag_bas : npc.sprites.poursuit_diag_haut;
+                    } else {
+                        npc.currentSprite = npc.sprites.poursuit;
+                    }
+                    npc.facingLeft = realDx < 0;
+                }
+
+                // Caught target? Rectangle-based check
+                const reachW = 56, reachH = 56;
+                const giflerHb = {
+                    x: npc.x - reachW / 2,
+                    y: npc.y + npc.hitbox.offsetY - reachH / 2,
+                    w: reachW,
+                    h: reachH,
+                };
+                const targetHb = playerHitbox(target.x, target.y);
+                if (rectsOverlap(giflerHb, targetHb)) {
+                    npc.state = 'gifle';
+                    npc.frame = 0; npc.animTimer = 0;
+                    npc.tombeTimer = 48;
+                    // Apply damage to the right player
+                    if (target === player) {
+                        player.gifleActive = true;
+                        player.gifleTimer = 48;
+                        player.health = Math.max(0, player.health - 1);
+                        player.headBlink = 120;
+                        player.frame = 0; player.animTimer = 0;
+                        playSound('gifle');
+                    } else {
+                        // Target is the remote player. Notify them.
+                        netSend({ type: 'world_event', event: 'gifle_remote' });
+                        playSound('gifle');
+                    }
+                }
+
+                // Target off screen (from her perspective): switch to angry patrol
+                if (!maitresseOnScreen) {
+                    resumePatrol(true);
+                }
+            } else if (npc.state === 'gifle') {
+                npc.currentSprite = npc.sprites.gifle;
+                npc.totalFrames = 4; npc.fps = 5;
+                npc.tombeTimer--;
+                if (npc.tombeTimer <= 0) {
+                    // Reset to calm patrol - find nearest waypoint
+                    resumePatrol(false);
+                    npc.vigilance = 'calm';
+                    npc.angrySpeedTimer = 0;
+                    npc.speed = npc.baseSpeed;
+                }
+            } else if (npc.state === 'idle') {
+                const target = npc.patrol[npc.patrolIndex];
+                npc.currentSprite = npc.sprites.idle;
+                npc.totalFrames = npc.idleFrames;
+                npc.waitTimer--;
+                // Resume patrol as soon as the idle animation has played through once,
+                // OR when the configured waitTimer expires (whichever comes first).
+                const animDone = npc.frame >= npc.totalFrames - 1;
+                if (animDone || npc.waitTimer <= 0) {
+                    npc.state = 'walking';
+                    npc.patrolIndex = (npc.patrolIndex + 1) % npc.patrol.length;
+                    npc.frame = 0; npc.animTimer = 0;
+                }
+                // If angry and player appears on screen, pursue!
+                if (npc.angrySpeedTimer > 0 && maitresseOnScreen) {
+                    npc.state = 'poursuit';
+                    npc.frame = 0; npc.animTimer = 0;
+                }
+            } else {
+                // Walking patrol
+                const target = npc.patrol[npc.patrolIndex];
+                const dx = target.x - npc.x;
+                const dy = target.y - npc.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist < npc.speed) {
+                    npc.x = target.x; npc.y = target.y;
+                    // Skip idle pauses when she's still in "angry" patrol speed
+                    if (target.wait && npc.angrySpeedTimer <= 0) {
+                        npc.state = 'idle';
+                        npc.waitTimer = target.wait;
+                        npc.frame = 0; npc.animTimer = 0;
+                    } else {
+                        npc.patrolIndex = (npc.patrolIndex + 1) % npc.patrol.length;
+                    }
+                    npc._patrolStuck = 0;
+                    npc.path = null;
+                } else {
+                    // Default: simple direct movement (fast, predictable). Only fall back
+                    // to smart A* pathfinding if Titeuf actually gets stuck (e.g. pinned
+                    // against a desk after a chase ended).
+                    const ndx = dx / dist;
+                    const ndy = dy / dist;
+                    const nx = npc.x + ndx * npc.speed;
+                    const ny = npc.y + ndy * npc.speed;
+                    const hb = { x: nx - npc.hitbox.w/2, y: ny + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
+                    let blocked = false;
+                    for (const c of COLLIDERS) { if (rectsOverlap(hb, c)) { blocked = true; break; } }
+
+                    let movedDx = 0, movedDy = 0;
+                    if (!blocked) {
+                        npc.x = nx; npc.y = ny;
+                        movedDx = ndx * npc.speed; movedDy = ndy * npc.speed;
+                        npc._patrolStuck = 0;
+                        npc.path = null; // healthy direct movement, drop any stale A* path
+                    } else {
+                        // Try axis sliding
+                        const hbX = { x: nx - npc.hitbox.w/2, y: npc.y + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
+                        const hbY = { x: npc.x - npc.hitbox.w/2, y: ny + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
+                        let xOk = true, yOk = true;
+                        for (const c of COLLIDERS) { if (rectsOverlap(hbX, c)) { xOk = false; break; } }
+                        for (const c of COLLIDERS) { if (rectsOverlap(hbY, c)) { yOk = false; break; } }
+                        if (xOk) { npc.x = nx; movedDx = ndx * npc.speed; }
+                        else if (yOk) { npc.y = ny; movedDy = ndy * npc.speed; }
+                    }
+
+                    // Detect if we're stuck (basic move + slide both failed or near-zero)
+                    const moveLen = Math.hypot(movedDx, movedDy);
+                    if (moveLen < 0.3) {
+                        npc._patrolStuck = (npc._patrolStuck || 0) + 1;
+                    } else {
+                        npc._patrolStuck = 0;
+                    }
+
+                    // After ~10 frames stuck, switch to A* pathfinding to contour the obstacle
+                    if (npc._patrolStuck > 10) {
+                        const beforeX = npc.x, beforeY = npc.y;
+                        moveNpcToward(npc, target.x, target.y, npc.speed);
+                        movedDx = npc.x - beforeX;
+                        movedDy = npc.y - beforeY;
+                        // If even A* can't help for too long, skip to next waypoint
+                        if (npc._patrolStuck > 90) {
+                            npc.patrolIndex = (npc.patrolIndex + 1) % npc.patrol.length;
+                            npc._patrolStuck = 0;
+                            npc.path = null;
+                        }
+                    }
+
+                    // Sprite from actual movement (so longing the wall shows walk_h)
+                    const realLen = Math.hypot(movedDx, movedDy);
+                    if (realLen > 0.1) {
+                        const absRdx = Math.abs(movedDx);
+                        const absRdy = Math.abs(movedDy);
+                        if (absRdy > absRdx) {
+                            npc.currentSprite = movedDy > 0 ? npc.sprites.walk_down : npc.sprites.walk_up;
+                        } else {
+                            npc.currentSprite = npc.sprites.walk_h;
+                        }
+                        npc.facingLeft = movedDx < 0;
+                    } else {
+                        // Idle-ish: keep current sprite, face toward target
+                        npc.facingLeft = dx < 0;
+                    }
+                    npc.totalFrames = npc.walkFrames;
+                }
+
+                // If angry and player appears on screen, pursue!
+                if (npc.angrySpeedTimer > 0 && maitresseOnScreen) {
+                    npc.state = 'poursuit';
+                    npc.frame = 0; npc.animTimer = 0;
+                }
+            }
+
+            // Animate
+            npc.animTimer += npc.fps / 60;
+            if (npc.animTimer >= 1) {
+                npc.animTimer = 0;
+                if (npc.state === 'tombe') {
+                    if (npc.frame < 5) {
+                        npc.frame = (npc.frame + 1) % npc.totalFrames;
+                    }
+                } else if (npc.state === 'gifle' || npc.state === 'idle') {
+                    // Play once, stop on last frame
+                    if (npc.frame < npc.totalFrames - 1) {
+                        npc.frame++;
+                    }
+                } else {
+                    npc.frame = (npc.frame + 1) % npc.totalFrames;
+                }
+            }
+
+            // Vigilance color
+            if (npc.angrySpeedTimer > 0) {
+                npc.vigilance = 'angry';
+            } else if (npc.state !== 'glisse' && npc.state !== 'tombe') {
+                if (npc.vigilanceRadius) {
+                    // In multi, check both players and take the worst (most alert) result
+                    const targets = (gameState.mode === 'multi' && remotePlayer.active)
+                        ? [player, remotePlayer] : [player];
+                    let bestVig = 'calm';
+                    for (const t of targets) {
+                        const vdx = t.x - npc.x;
+                        const vdy = t.y - npc.y;
+                        const vdist = Math.sqrt(vdx * vdx + vdy * vdy);
+                        let inFront = false;
+                        if (vdist < npc.vigilanceRadius) {
+                            const sprite = npc.currentSprite || '';
+                            const isPureUp = sprite.includes('walk_up') ||
+                                (sprite.includes('poursuit_haut') && !sprite.includes('poursuit_diag_haut'));
+                            const isPureDown = sprite.includes('walk_down') ||
+                                (sprite.includes('poursuit_bas') && !sprite.includes('poursuit_diag_bas'));
+                            if (isPureUp) inFront = vdy < 0;
+                            else if (isPureDown) inFront = vdy > 0;
+                            else inFront = npc.facingLeft ? vdx < 0 : vdx > 0;
+                        }
+                        if (vdist < npc.vigilanceRadius && inFront) bestVig = 'alert';
+                    }
+                    npc.vigilance = bestVig;
+                }
+            }
+        }
+        } // end else (host NPC simulation)
+
+        // ========== NPC SLIPPING ON DROPPED ITEMS ==========
+        // If an NPC walks over a world item while moving (walking/poursuit),
+        // it slips and slides in the direction it was moving.
+        // Host-only: joiner just receives state.
+        if (!skipNpcSim) {
+        for (const npc of npcs) {
+            if (!npc.patrol) continue;
+            // Only slip if currently moving with intent
+            if (npc.state !== 'walking' && npc.state !== 'poursuit') continue;
+            // Need a recent movement direction (compute from last position)
+            if (npc._lastX === undefined) { npc._lastX = npc.x; npc._lastY = npc.y; continue; }
+            const moveDx = npc.x - npc._lastX;
+            const moveDy = npc.y - npc._lastY;
+            const moveLen = Math.hypot(moveDx, moveDy);
+            npc._lastX = npc.x; npc._lastY = npc.y;
+            if (moveLen < 0.3) continue; // not really moving
+
+            // Check collision with any picked-up-able world item
+            const npcHb = { x: npc.x - 18, y: npc.y - 12, w: 36, h: 24 };
+            for (const item of worldItems) {
+                if (item.picked) continue;
+                // Only items that Titeuf has dropped/thrown act as traps.
+                // The item sitting at its initial spawn point is not slippery.
+                if (!item.dropped) continue;
+                const itemHb = { x: item.x - item.size/2, y: item.y - item.size/2, w: item.size, h: item.size };
+                if (!rectsOverlap(npcHb, itemHb)) continue;
+
+                // SLIP! Trigger glisse in current movement direction
+                const norm = 1 / moveLen;
+                const slipDx = moveDx * norm;
+                const slipDy = moveDy * norm;
+                npc.state = 'glisse';
+                npc.slideKind = slideKindFor(slipDx, slipDy);
+                const gInfo = glisseSpriteFor(npc, npc.slideKind);
+                npc.currentSprite = gInfo.sprite;
+                npc.totalFrames = gInfo.frames;
+                npc.frame = 0; npc.animTimer = 0; npc.fps = 10;
+                npc.slideDx = slipDx * 3;
+                npc.slideDy = slipDy * 3;
+                npc.slideLife = 45;
+                if (slipDx !== 0) npc.facingLeft = slipDx < 0;
+                // A dropped trap is a deliberate Titeuf action: it counts as a combo hit.
+                npc.comboCount = (npc.comboCount || 0) + 1;
+                // Item disappears, schedule respawn
+                item.picked = true;
+                item.respawnTimer = -1; // -1 = wait for NPC recovery
+                startGlisseSound();
+                break;
+            }
+        }
+        } // end if !skipNpcSim (slipping)
+
+        // ========== WORLD ITEM RESPAWN ==========
+        // Items that hit a NPC (thrown or trap) reappear at their spawn point
+        // once no NPC is in glisse/tombe state anymore.
+        for (const item of worldItems) {
+            if (!item.picked) continue;
+            if (item.respawnTimer === -1) {
+                // Wait for all NPCs to recover from glisse/tombe
+                let anyRecovering = false;
+                for (const n of npcs) {
+                    if (n.state === 'glisse' || n.state === 'tombe') { anyRecovering = true; break; }
+                }
+                if (!anyRecovering) {
+                    item.respawnTimer = 180; // 3s grace then respawn
+                }
+            } else if (item.respawnTimer > 0) {
+                item.respawnTimer--;
+                if (item.respawnTimer === 0) {
+                    item.x = item.spawnX;
+                    item.y = item.spawnY;
+                    item.picked = false;
+                    item.dropped = false;
+                }
+            }
+        }
+
+        // ========== ITEMS ==========
+        // Pickup: check if player is near a world item.
+        // Each item has its own pickupCooldown (set when Titeuf drops it) so he doesn't
+        // immediately re-grab a freshly placed trap.
+        for (const item of worldItems) {
+            if (item.pickupCooldown > 0) item.pickupCooldown--;
+            if (item.picked) continue;
+            if (item.pickupCooldown > 0) continue;
+            const dx = player.x - item.x;
+            const dy = player.y - item.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 45) {
+                item.picked = true;
+                item.dropped = false; // back in inventory, no longer a trap
+                if (!inventory.owned.includes(item.id)) inventory.owned.push(item.id);
+                inventory.item = item.id; // newly picked becomes selected
+                inventory.showAnim = 0;
+                inventory.showAnimActive = true;
+                playSound('loot');
+            }
+        }
+
+        // Health pickup: heals 1 HP up to 3 max, then disappears for 60s.
+        if (healthPickup.picked) {
+            healthPickup.respawnTimer--;
+            if (healthPickup.respawnTimer <= 0) {
+                healthPickup.picked = false;
+            }
+        } else {
+            const hdx = player.x - healthPickup.x;
+            const hdy = player.y - healthPickup.y;
+            const hdist = Math.sqrt(hdx * hdx + hdy * hdy);
+            if (hdist < 45 && player.health < 3) {
+                player.health = Math.min(3, player.health + 1);
+                healthPickup.picked = true;
+                healthPickup.respawnTimer = healthPickup.respawnDuration;
+                playSound('loot');
+            }
+        }
+
+        // Inventory slide-up animation
+        if (inventory.showAnimActive) {
+            inventory.showAnim += 0.04;
+            if (inventory.showAnim >= 1) {
+                inventory.showAnim = 1;
+                inventory.showAnimActive = false;
+            }
+        }
+
+        // Switch held item with RB/LB (gamepad) or BracketRight/BracketLeft (keyboard).
+        // Only meaningful when Titeuf has 2+ items in his inventory.
+        const rbPressed = (gamepad.rb && !gamepad.rbPrev) || (keys['BracketRight'] && !keys['_prevBR']);
+        const lbPressed = (gamepad.lb && !gamepad.lbPrev) || (keys['BracketLeft'] && !keys['_prevBL']);
+        keys['_prevBR'] = keys['BracketRight'];
+        keys['_prevBL'] = keys['BracketLeft'];
+        if ((rbPressed || lbPressed) && inventory.owned.length > 1) {
+            const idx = inventory.owned.indexOf(inventory.item);
+            const dir = rbPressed ? 1 : -1;
+            const next = (idx + dir + inventory.owned.length) % inventory.owned.length;
+            inventory.item = inventory.owned[next];
+            // Re-trigger the slide-up so the player sees a feedback
+            inventory.showAnim = 0.5;
+            inventory.showAnimActive = true;
+            playSound('loot');
+        }
+
+        // Throw with A key or gamepad A (on press, not hold)
+        const aPressed = (keys['KeyA'] && !keys['_prevA']) || (gamepad.a && !gamepad.aPrev);
+        keys['_prevA'] = keys['KeyA'];
+
+        if (aPressed && inventory.item) {
+            // In panique mode: drop the item as a trap on the floor instead of throwing.
+            // Any NPC walking onto it will slide.
+            if (player.panique) {
+                // Drop slightly in front of player, fall back to player position if blocked
+                const ld = player.lastDirection;
+                let dropDx = 0, dropDy = 0;
+                if (ld === 'down') dropDy = 1;
+                else if (ld === 'up') dropDy = -1;
+                else if (ld === 'diag_haut') { dropDx = player.facingLeft ? -1 : 1; dropDy = -1; }
+                else if (ld === 'diag_bas') { dropDx = player.facingLeft ? -1 : 1; dropDy = 1; }
+                else dropDx = player.facingLeft ? -1 : 1;
+                if (dropDx !== 0 && dropDy !== 0) {
+                    const inv = 1 / Math.SQRT2;
+                    dropDx *= inv; dropDy *= inv;
+                }
+                let px = player.x + dropDx * 25;
+                let py = player.y + dropDy * 25;
+                const hb = { x: px - 12, y: py - 6, w: 24, h: 12 };
+                let blocked = false;
+                for (const c of COLLIDERS) {
+                    if (rectsOverlap(hb, c)) { blocked = true; break; }
+                }
+                if (blocked) { px = player.x; py = player.y; }
+
+                // The entry already exists in worldItems (Titeuf just picked it up).
+                // Just put it back on the floor as a trap.
+                const entry = worldItems.find(w => w.id === inventory.item);
+                if (entry) {
+                    entry.x = px; entry.y = py;
+                    entry.picked = false;
+                    entry.respawnTimer = 0;
+                    entry.dropped = true; // marks as a trap
+                    entry.pickupCooldown = 60; // 1s before Titeuf can pick it back
+                }
+                inventoryRemoveCurrent();
+                inventory.showAnim = 0;
+                inventory.showAnimActive = inventory.item !== null;
+                playSound('drop');
+            } else {
+            // Determine throw direction based on player facing
+            let throwDx = 0, throwDy = 0;
+            const ld = player.lastDirection;
+            if (ld === 'down') { throwDy = 1; }
+            else if (ld === 'up') { throwDy = -1; }
+            else if (ld === 'diag_haut') {
+                throwDx = player.facingLeft ? -1 : 1;
+                throwDy = -1;
+            } else if (ld === 'diag_bas') {
+                throwDx = player.facingLeft ? -1 : 1;
+                throwDy = 1;
+            } else {
+                throwDx = player.facingLeft ? -1 : 1;
+            }
+            // Normalize diagonal
+            if (throwDx !== 0 && throwDy !== 0) {
+                const inv = 1 / Math.SQRT2;
+                throwDx *= inv;
+                throwDy *= inv;
+            }
+
+            // Spawn item a bit in front of player
+            let spawnX = player.x + throwDx * 20;
+            let spawnY = player.y + throwDy * 20;
+            // Make sure spawn point is not inside a collider
+            const spawnHb = { x: spawnX - 12, y: spawnY - 6, w: 24, h: 12 };
+            let spawnBlocked = false;
+            for (const c of COLLIDERS) {
+                if (rectsOverlap(spawnHb, c)) { spawnBlocked = true; break; }
+            }
+            if (spawnBlocked) {
+                // Fall back to player position
+                spawnX = player.x;
+                spawnY = player.y;
+            }
+
+            // Use sprite and size from the world item entry instead of hardcoding voiture.
+            const heldEntry = worldItems.find(w => w.id === inventory.item);
+            const heldSprite = heldEntry ? heldEntry.sprite : 'item_voiture';
+            const heldSize = heldEntry ? heldEntry.size : 38;
+
+            thrownItems.push({
+                id: inventory.item,
+                sprite: heldSprite,
+                x: spawnX,
+                y: spawnY,
+                dx: throwDx * 9,
+                dy: throwDy * 9,
+                life: 55,
+                size: heldSize,
+                sliding: true,
+            });
+            inventoryRemoveCurrent();
+            inventory.showAnim = 0;
+            inventory.showAnimActive = inventory.item !== null;
+            playSound('drop');
+
+            // Throwing in front of an alert (yellow) NPC instantly triggers pursuit:
+            // she saw the projectile fly past her face.
+            for (const n of npcs) {
+                if (!n.patrol) continue;
+                if (n.vigilance !== 'alert') continue;
+                if (n.state === 'glisse' || n.state === 'tombe' || n.state === 'gifle') continue;
+                n.state = 'poursuit';
+                n.vigilance = 'angry';
+                n.angrySpeedTimer = 420; // 7s of anger
+                n.frame = 0; n.animTimer = 0;
+                n.path = null; n.pathRecalcTimer = 0;
+            }
+            }
+        }
+
+        // Update thrown items
+        for (let i = thrownItems.length - 1; i >= 0; i--) {
+            const t = thrownItems[i];
+            if (t.sliding) {
+                // Step-by-step collision (check each pixel along path)
+                const speed = Math.sqrt(t.dx * t.dx + t.dy * t.dy);
+                const steps = Math.max(1, Math.ceil(speed));
+                const stepDx = t.dx / steps;
+                const stepDy = t.dy / steps;
+                let hitWall = false;
+                let hitNpc = false; // separate flag: NPC hit means item disappears, not lands
+
+                for (let s = 0; s < steps; s++) {
+                    const nx = t.x + stepDx;
+                    const ny = t.y + stepDy;
+                    // Full item hitbox (covers entire visual area)
+                    const itemHb = { x: nx - 15, y: ny - 30, w: 30, h: 35 };
+                    let blocked = false;
+                    for (const c of COLLIDERS) {
+                        if (rectsOverlap(itemHb, c)) { blocked = true; break; }
+                    }
+                    // Check NPC collision (maitresse)
+                    if (!blocked) {
+                        for (const npc of npcs) {
+                            if (npc.name !== 'maitresse') continue;
+                            // Allow hits while sliding (to extend combo) but not while falling/slapping
+                            if (npc.state === 'tombe' || npc.state === 'gifle') continue;
+                            const npcHb = { x: npc.x - 20, y: npc.y - 20, w: 40, h: 30 };
+                            if (rectsOverlap(itemHb, npcHb)) {
+                                const wasSliding = npc.state === 'glisse';
+                                // Start (or refresh) glisse state
+                                npc.state = 'glisse';
+                                npc.slideKind = slideKindFor(t.dx, t.dy);
+                                const gInfo = glisseSpriteFor(npc, npc.slideKind);
+                                npc.currentSprite = gInfo.sprite;
+                                npc.totalFrames = gInfo.frames;
+                                if (!wasSliding) { npc.frame = 0; npc.animTimer = 0; }
+                                npc.fps = 10;
+                                // Slide in throw direction
+                                const throwSpeed = Math.sqrt(t.dx * t.dx + t.dy * t.dy);
+                                const norm = throwSpeed > 0 ? throwSpeed : 1;
+                                npc.slideDx = (t.dx / norm) * 3;
+                                npc.slideDy = (t.dy / norm) * 3;
+                                npc.slideLife = 45; // reset slide duration on every hit (combo extender)
+                                // Increment combo
+                                npc.comboCount = (npc.comboCount || 0) + 1;
+                                // Face direction of slide (keep current facing if purely vertical)
+                                if (t.dx !== 0) npc.facingLeft = t.dx < 0;
+                                // Mark item as picked + scheduled for respawn at spawn point
+                                const entry = worldItems.find(w => w.id === t.id);
+                                if (entry) {
+                                    entry.picked = true;
+                                    entry.respawnTimer = -1;
+                                }
+                                startGlisseSound();
+                                hitNpc = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (hitNpc) break;
+                    if (blocked) {
+                        hitWall = true;
+                        break;
+                    }
+                    t.x = nx;
+                    t.y = ny;
+                }
+
+                if (hitNpc) {
+                    // Item vanishes, do NOT add to worldItems on the floor
+                    thrownItems.splice(i, 1);
+                    continue;
+                }
+
+                if (hitWall) {
+                    // Push item back a bit so it's clearly accessible
+                    const pushBack = 5;
+                    if (Math.abs(t.dx) > Math.abs(t.dy)) {
+                        t.x -= Math.sign(t.dx) * pushBack;
+                    } else {
+                        t.y -= Math.sign(t.dy) * pushBack;
+                    }
+                    t.sliding = false;
+                    const entry = worldItems.find(w => w.id === t.id);
+                    if (entry) {
+                        entry.x = t.x; entry.y = t.y;
+                        entry.picked = false;
+                        entry.respawnTimer = 0;
+                        entry.dropped = true; // thrown by Titeuf -> acts as a trap
+                    } else {
+                        worldItems.push({
+                            id: t.id, sprite: t.sprite,
+                            x: t.x, y: t.y, size: t.size, picked: false,
+                            spawnX: t.x, spawnY: t.y, respawnTimer: 0, dropped: true,
+                        });
+                    }
+                    thrownItems.splice(i, 1);
+                    continue;
+                }
+
+                t.life--;
+                t.dx *= 0.94;
+                t.dy *= 0.94;
+                if (t.life <= 0) {
+                    t.sliding = false;
+                    const entry = worldItems.find(w => w.id === t.id);
+                    if (entry) {
+                        entry.x = t.x; entry.y = t.y;
+                        entry.picked = false;
+                        entry.respawnTimer = 0;
+                        entry.dropped = true; // thrown by Titeuf -> acts as a trap
+                    } else {
+                        worldItems.push({
+                            id: t.id, sprite: t.sprite,
+                            x: t.x, y: t.y, size: t.size, picked: false,
+                            spawnX: t.x, spawnY: t.y, respawnTimer: 0, dropped: true,
+                        });
+                    }
+                    thrownItems.splice(i, 1);
+                }
+            }
+        }
+
+        // Network ticks (multi only)
+        netTickPlayer();
+        netTickWorldState();
+    }
+
+    // ========== RENDER ==========
+    function render() {
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const zoom = CONFIG.CAMERA_ZOOM;
+
+        ctx.clearRect(0, 0, cw, ch);
+        ctx.save();
+
+        const viewW = cw / zoom;
+        const viewH = ch / zoom;
+        let camX = Math.max(viewW / 2, Math.min(CONFIG.MAP_W - viewW / 2, camera.x));
+        let camY = Math.max(viewH / 2, Math.min(CONFIG.MAP_H - viewH / 2, camera.y));
+
+        ctx.scale(zoom, zoom);
+        ctx.translate(-camX + viewW / 2, -camY + viewH / 2);
+
+        // Map
+        ctx.drawImage(images.map, 0, 0, CONFIG.MAP_W, CONFIG.MAP_H);
+
+        // ========== RENDER ALL ENTITIES (Y-sorted) ==========
+        // Build list of all entities to render
+        const entities = [];
+
+        // Player entity
+        entities.push({
+            type: 'player',
+            y: player.y,
+            x: player.x,
+        });
+
+        // Remote player (multi only)
+        if (remotePlayer.active) {
+            entities.push({
+                type: 'remote_player',
+                y: remotePlayer.y,
+                x: remotePlayer.x,
+            });
+        }
+
+        // NPC entities
+        for (const npc of npcs) {
+            entities.push({
+                type: 'npc',
+                y: npc.y,
+                x: npc.x,
+                npc: npc,
+            });
+        }
+
+        // World items (not picked up)
+        for (const item of worldItems) {
+            if (item.picked) continue;
+            entities.push({
+                type: 'world_item',
+                y: item.y,
+                x: item.x,
+                item: item,
+            });
+        }
+
+        // Health pickup (animated, 2 frames)
+        if (!healthPickup.picked) {
+            entities.push({
+                type: 'health_pickup',
+                y: healthPickup.y,
+                x: healthPickup.x,
+            });
+        }
+
+        // Exit arrow over the top-left door
+        entities.push({
+            type: 'exit_arrow',
+            y: exitArrow.y,
+            x: exitArrow.x,
+        });
+
+        // Thrown items
+        for (const t of thrownItems) {
+            entities.push({
+                type: 'thrown_item',
+                y: t.y,
+                x: t.x,
+                thrown: t,
+            });
+        }
+
+        // Sort by Y (feet position) — lower Y drawn first (behind)
+        entities.sort((a, b) => a.y - b.y);
+
+        // Render each entity
+        for (const ent of entities) {
+            if (ent.type === 'player') {
+                // Shadow
+                ctx.save();
+                ctx.globalAlpha = 0.25;
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.ellipse(player.x, player.y + 5, P_RENDER_W * 0.35, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+
+                // Sprite
+                let spriteImg;
+                let pCols = CONFIG.SPRITE_COLS;
+                let pCellW = CONFIG.SPRITE_CELL_W;
+                let pCellH = CONFIG.SPRITE_CELL_H;
+                let pTotalFrames = ANIM_FRAMES[player.currentAnim] || 5;
+                if (player.currentAnim === 'gifle') {
+                    spriteImg = images.titeuf_gifle;
+                    pCols = 4; pTotalFrames = 3;
+                } else {
+                    spriteImg = images[player.currentAnim];
+                }
+                const col = player.frame % pCols;
+                const row = Math.floor(player.frame / pCols);
+                const srcX = col * pCellW;
+                const srcY = row * pCellH;
+
+                ctx.save();
+                ctx.translate(player.x, player.y);
+                const noFlip = player.currentAnim === 'idle_down' || player.currentAnim === 'idle_up' || player.currentAnim === 'run_down' || player.currentAnim === 'run_up' || player.currentAnim === 'panique_haut' || player.currentAnim === 'panique_bas';
+                if (!noFlip && player.facingLeft) {
+                    ctx.scale(-1, 1);
+                }
+                ctx.drawImage(
+                    spriteImg,
+                    srcX, srcY, CONFIG.SPRITE_CELL_W, CONFIG.SPRITE_CELL_H,
+                    -P_RENDER_W / 2, -P_RENDER_H + 12,
+                    P_RENDER_W, P_RENDER_H
+                );
+                ctx.restore();
+
+            } else if (ent.type === 'remote_player') {
+                // Shadow
+                ctx.save();
+                ctx.globalAlpha = 0.25;
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.ellipse(remotePlayer.x, remotePlayer.y + 5, P_RENDER_W * 0.35, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+
+                // Sprite (same logic as local player but reads remotePlayer fields)
+                let rSpriteImg;
+                let rCols = CONFIG.SPRITE_COLS;
+                let rCellW = CONFIG.SPRITE_CELL_W;
+                let rCellH = CONFIG.SPRITE_CELL_H;
+                const rAnim = remotePlayer.currentAnim || 'idle';
+                if (rAnim === 'gifle') {
+                    rSpriteImg = images.titeuf_gifle;
+                    rCols = 4;
+                } else {
+                    rSpriteImg = images[rAnim] || images.idle;
+                }
+                if (!rSpriteImg) continue;
+                const rCol = remotePlayer.frame % rCols;
+                const rRow = Math.floor(remotePlayer.frame / rCols);
+                const rSrcX = rCol * rCellW;
+                const rSrcY = rRow * rCellH;
+
+                ctx.save();
+                ctx.translate(remotePlayer.x, remotePlayer.y);
+                const rNoFlip = rAnim === 'idle_down' || rAnim === 'idle_up' || rAnim === 'run_down' || rAnim === 'run_up' || rAnim === 'panique_haut' || rAnim === 'panique_bas';
+                if (!rNoFlip && remotePlayer.facingLeft) {
+                    ctx.scale(-1, 1);
+                }
+                ctx.drawImage(
+                    rSpriteImg,
+                    rSrcX, rSrcY, CONFIG.SPRITE_CELL_W, CONFIG.SPRITE_CELL_H,
+                    -P_RENDER_W / 2, -P_RENDER_H + 12,
+                    P_RENDER_W, P_RENDER_H
+                );
+                ctx.restore();
+
+            } else if (ent.type === 'npc') {
+                const npc = ent.npc;
+                const npcImg = images[npc.currentSprite || npc.sprites?.idle || npc.sprite];
+                if (!npcImg) continue;
+                const nCol = npc.frame % npc.cols;
+                const nRow = Math.floor(npc.frame / npc.cols);
+                const nSrcX = nCol * npc.cellW;
+                const nSrcY = nRow * npc.cellH;
+                const nRW = npc.cellW * npc.scale;
+                const nRH = npc.cellH * npc.scale;
+
+                // Shadow (aligned with feet)
+                const oY = npc.offsetY || 12;
+                ctx.save();
+                ctx.globalAlpha = 0.2;
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.ellipse(npc.x, npc.y + oY, nRW * 0.3, 5, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+
+                // Sprite
+                ctx.save();
+                ctx.translate(npc.x, npc.y);
+                const cs = npc.currentSprite || '';
+                // Vertical-only sprites: never flip horizontally.
+                // We must NOT match the diagonal sprites here (they share the haut/bas suffix
+                // but represent left/right facings and need flipping).
+                const isVerticalOnly =
+                    cs.includes('walk_down') ||
+                    cs.includes('walk_up') ||
+                    (cs.includes('glisse_haut') && !cs.includes('glisse_diag_haut')) ||
+                    (cs.includes('glisse_bas') && !cs.includes('glisse_diag_bas')) ||
+                    (cs.includes('tombe_haut') && !cs.includes('tombe_diag_haut')) ||
+                    (cs.includes('tombe_bas') && !cs.includes('tombe_diag_bas')) ||
+                    (cs.includes('poursuit_bas') && !cs.includes('poursuit_diag_bas')) ||
+                    (cs.includes('poursuit_haut') && !cs.includes('poursuit_diag_haut'));
+                const npcNoFlip = isVerticalOnly;
+                if (!npcNoFlip && npc.facingLeft) {
+                    ctx.scale(-1, 1);
+                }
+                ctx.drawImage(
+                    npcImg,
+                    nSrcX, nSrcY, npc.cellW, npc.cellH,
+                    -nRW / 2, -nRH + oY,
+                    nRW, nRH
+                );
+                ctx.restore();
+            } else if (ent.type === 'world_item') {
+                const item = ent.item;
+                const itemImg = images[item.sprite];
+                if (!itemImg) continue;
+                const s = item.size;
+                // Shadow
+                ctx.save();
+                ctx.globalAlpha = 0.2;
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.ellipse(item.x, item.y + 5, s * 0.3, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+                // Item sprite (no floating)
+                ctx.drawImage(itemImg, item.x - s / 2, item.y - s + 10, s, s);
+
+            } else if (ent.type === 'thrown_item') {
+                const t = ent.thrown;
+                const tImg = images[t.sprite];
+                if (!tImg) continue;
+                ctx.drawImage(tImg, t.x - t.size / 2, t.y - t.size / 2, t.size, t.size);
+
+            } else if (ent.type === 'health_pickup') {
+                // Sprite is 64x16 but content is 2 frames of 16x16 side-by-side.
+                const frame = Math.floor(Date.now() / 250) % 2;
+                const srcW = 16, srcH = 16;
+                const renderW = healthPickup.size;
+                const renderH = healthPickup.size;
+                // Shadow
+                ctx.save();
+                ctx.globalAlpha = 0.2;
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.ellipse(healthPickup.x, healthPickup.y + 5, renderW * 0.3, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+                ctx.drawImage(
+                    images.item_hp,
+                    frame * srcW, 0, srcW, srcH,
+                    healthPickup.x - renderW / 2, healthPickup.y - renderH + 8, renderW, renderH
+                );
+
+            } else if (ent.type === 'exit_arrow') {
+                // Grey static arrow until score >= 8, then yellow animated 4-frame sheet.
+                const size = exitArrow.size;
+                const x = exitArrow.x - size / 2;
+                const y = exitArrow.y - size / 2;
+                if (player.score >= 8) {
+                    // Animated 4 frames, 8 fps (each frame = 7.5 game frames)
+                    exitArrow.animTimer = (exitArrow.animTimer || 0) + 1;
+                    if (exitArrow.animTimer >= 8) {
+                        exitArrow.animTimer = 0;
+                        exitArrow.frame = (exitArrow.frame + 1) % 4;
+                    }
+                    ctx.drawImage(
+                        images.fleche_jaune,
+                        exitArrow.frame * 32, 0, 32, 32,
+                        x, y, size, size
+                    );
+                } else {
+                    ctx.drawImage(images.fleche, x, y, size, size);
+                }
+            }
+        }
+
+        // ========== VIGILANCE DOTS (world space, above NPC heads) ==========
+        for (const npc of npcs) {
+            if (!npc.vigilanceRadius) continue;
+            if (npc.state === 'tombe' || npc.state === 'glisse') continue; // no dot when down
+            const nRH = npc.cellH * npc.scale;
+            const oY = npc.offsetY || 12;
+            const dotColor = npc.vigilance === 'angry' ? '#FF2020' : npc.vigilance === 'alert' ? '#FFD700' : '#1a3a8a';
+            const dotX = npc.x;
+            const dotY = npc.y - nRH + oY - 10;
+
+            ctx.save();
+            ctx.fillStyle = dotColor;
+            ctx.shadowColor = dotColor;
+            ctx.shadowBlur = 6;
+            ctx.beginPath();
+            ctx.arc(dotX, dotY, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // DEBUG (uncomment to debug)
+        /*
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,0,0,0.5)';
+        ctx.lineWidth = 1;
+        for (const c of COLLIDERS) ctx.strokeRect(c.x, c.y, c.w, c.h);
+        const hb = playerHitbox(player.x, player.y);
+        ctx.strokeStyle = 'rgba(0,255,0,0.8)';
+        ctx.strokeRect(hb.x, hb.y, hb.w, hb.h);
+        ctx.restore();
+        */
+
+        // Score popup over Titeuf's head (in world space, inside camera transform)
+        if (player.scorePopup) {
+            const total = 180; // 3 seconds at 60fps
+            const t = player.scorePopup.timer / total; // 1 → 0
+            // Rises a bit while displayed (smooth ease-out)
+            const progress = 1 - t; // 0 → 1
+            const yOffset = -72 - progress * 18; // -72 → -90
+            // Fade out only at the very end
+            const alpha = t < 0.25 ? t * 4 : 1;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.font = 'bold 14px "Comic Sans MS", cursive';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#000';
+            ctx.fillStyle = '#FFFFFF';
+            const px = player.x;
+            const py = player.y + yOffset;
+            ctx.strokeText(player.scorePopup.text, px, py);
+            ctx.fillText(player.scorePopup.text, px, py);
+            ctx.restore();
+        }
+
+        ctx.restore();
+
+        // ========== OFF-SCREEN NPC INDICATORS ==========
+        for (const npc of npcs) {
+            if (!npc.vigilanceRadius) continue;
+            if (npc.state === 'tombe' || npc.state === 'glisse') continue;
+            const dotColor = npc.vigilance === 'angry' ? '#FF2020' : npc.vigilance === 'alert' ? '#FFD700' : '#1a3a8a';
+
+            // Convert NPC world pos to screen pos
+            const screenX = (npc.x - camX + viewW / 2) * zoom;
+            const screenY = (npc.y - camY + viewH / 2) * zoom;
+
+            const margin = 20;
+            const hudBottom = ch - 80 - 20; // above HUD bar
+            const isOffScreen = screenX < -margin || screenX > cw + margin ||
+                                screenY < -margin || screenY > hudBottom + margin;
+
+            if (isOffScreen) {
+                // Clamp to screen edges, Y stops above HUD bar
+                const clampX = Math.max(margin, Math.min(cw - margin, screenX));
+                const clampY = Math.max(margin, Math.min(hudBottom, screenY));
+
+                ctx.save();
+                // Outer glow
+                ctx.fillStyle = dotColor;
+                ctx.shadowColor = dotColor;
+                ctx.shadowBlur = 15;
+                ctx.beginPath();
+                ctx.arc(clampX, clampY, 14, 0, Math.PI * 2);
+                ctx.fill();
+                // Inner dot
+                ctx.shadowBlur = 0;
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.arc(clampX, clampY, 5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // ========== HUD BAR ==========
+        const hudH = 80;
+        const hudY = ch - hudH;
+
+        // Purple bar background
+        ctx.fillStyle = '#2a0845';
+        ctx.fillRect(0, hudY, cw, hudH);
+        // Gold top border
+        ctx.fillStyle = '#c8a800';
+        ctx.fillRect(0, hudY, cw, 5);
+
+        ctx.imageSmoothingEnabled = false;
+
+        // Titeuf head (left side) - blinks when hit, sprite changes with HP
+        const headSize = 190;
+        const headX = 8;
+        const headY = hudY + (hudH - headSize) / 2 - 60;
+        const showHead = player.headBlink <= 0 || Math.floor(player.headBlink / 8) % 2 === 0;
+        if (showHead) {
+            let headImg = images.hud_tete;
+            if (player.health === 2) headImg = images.hud_tete_2hp;
+            else if (player.health <= 1) headImg = images.hud_tete_1hp;
+            ctx.drawImage(headImg, headX, headY, headSize, headSize);
+        }
+
+        // Stars (point de vie) - only show remaining health
+        const starSize = 96;
+        const starStartX = headX + headSize + 16;
+        const starY = hudY + (hudH - starSize) / 2 + 4;
+        for (let i = 0; i < player.health; i++) {
+            ctx.drawImage(images.hud_vie, starStartX + i * (starSize + 8), starY, starSize, starSize);
+        }
+
+        // Trophy + score (right area)
+        const coupeSize = 56;
+        const coupeX = cw * 0.65;
+        const coupeY = hudY + (hudH - coupeSize) / 2 + 4;
+        // Score text (left of trophy)
+        ctx.fillStyle = '#FFD700';
+        ctx.font = 'bold 44px "Comic Sans MS", cursive';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(player.score), coupeX - 10, hudY + hudH / 2 + 4);
+        // Trophy
+        ctx.drawImage(images.hud_coupe, coupeX, coupeY, coupeSize, coupeSize);
+
+        // ========== INVENTORY ICON (bottom right, above HUD bar) ==========
+        if (inventory.item || inventory.showAnimActive) {
+            const invSize = 180;
+            const invX = cw - invSize - 20;
+            // Slide from below HUD bar to above it
+            const targetY = hudY - invSize - 8;
+            const startY = ch + invSize;
+            const t = inventory.showAnim;
+            // Ease out
+            const eased = 1 - Math.pow(1 - t, 3);
+            const invY = startY + (targetY - startY) * eased;
+
+            // Item icon — choose sprite based on what Titeuf actually holds
+            ctx.imageSmoothingEnabled = false;
+            const invEntry = worldItems.find(w => w.id === inventory.item);
+            const invImg = invEntry ? images[invEntry.sprite] : images.item_voiture;
+            if (invImg) ctx.drawImage(invImg, invX, invY, invSize, invSize);
+        }
+
+        // ========== PANIQUE BUTTON INDICATOR (top right) ==========
+        if (player.panique) {
+            // Sprite is 64x32 but the actual content is 2 frames of 16x32 side-by-side:
+            //   frame 0: button B alone, frame 1: button B with arrow (pressed).
+            const btnFrame = Math.floor(Date.now() / 100) % 2;
+            const srcW = 16, srcH = 32;
+            // Render at 7x scale to be highly visible
+            const renderW = srcW * 7;  // 112
+            const renderH = srcH * 7;  // 224
+            const btnX = cw - renderW - 24;
+            const btnY = 24;
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(
+                images.hud_button_a,
+                btnFrame * srcW, 0, srcW, srcH,
+                btnX, btnY, renderW, renderH
+            );
+        }
+    }
+
+    // ========== RESIZE ==========
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        ctx.imageSmoothingEnabled = false;
+    }
+    window.addEventListener('resize', resize);
+
+    // ========== GAME LOOP ==========
+    const FRAME_TIME = 1000 / 60;
+    let accumulator = 0;
+
+    // ========== MENU & DEFI SCREENS ==========
+    // Track edge-press state for navigation buttons
+    const screenInput = {
+        aPrev: false,
+        bPrev: false,
+        upPrev: false,
+        downPrev: false,
+    };
+    function pollScreenInput() {
+        // Read raw input (poll gamepad first)
+        pollGamepad();
+        const aDown = !!keys['KeyA'] || !!gamepad.a;
+        // B button: keyboard B + gamepad B (button 1 in standard mapping)
+        const gp = navigator.getGamepads ? navigator.getGamepads()[0] : null;
+        const gpBPressed = gp && gp.buttons[1] && gp.buttons[1].pressed;
+        const bDown = !!keys['KeyB'] || gpBPressed;
+        const upDown = !!keys['ArrowUp'] || !!keys['KeyZ'] || gamepad.dpad.up || gamepad.ly < -DEADZONE;
+        const downDown = !!keys['ArrowDown'] || !!keys['KeyS'] || gamepad.dpad.down || gamepad.ly > DEADZONE;
+        const result = {
+            aPressed: aDown && !screenInput.aPrev,
+            bPressed: bDown && !screenInput.bPrev,
+            upPressed: upDown && !screenInput.upPrev,
+            downPressed: downDown && !screenInput.downPrev,
+        };
+        screenInput.aPrev = aDown;
+        screenInput.bPrev = bDown;
+        screenInput.upPrev = upDown;
+        screenInput.downPrev = downDown;
+        return result;
+    }
+
+    function updateMenu(dt) {
+        const inp = pollScreenInput();
+        if (inp.upPressed) gameState.menuSelection = Math.max(0, gameState.menuSelection - 1);
+        if (inp.downPressed) gameState.menuSelection = Math.min(1, gameState.menuSelection + 1);
+        if (inp.aPressed) {
+            if (gameState.menuSelection === 0) {
+                // Solo: go to defi screen, restart music from start
+                gameState.mode = 'solo';
+                gameState.screen = 'defi';
+                gameState.defiAnim = 0;
+                gameState.defiSelfReady = false;
+                restartMusicFromStart();
+            } else {
+                // Multijoueur: open nickname modal
+                gameState.mode = 'multi';
+                openNicknameModal();
+            }
+        }
+    }
+
+    function updateLobby(dt) {
+        const inp = pollScreenInput();
+        // Host can press A to start the defi screen once a peer is connected
+        if (net.isHost && net.connected && inp.aPressed) {
+            netSend({ type: 'start_defi' });
+            gameState.screen = 'defi';
+            gameState.defiAnim = 0;
+            gameState.defiSelfReady = false;
+            gameState.defiReadyCount = 0;
+            restartMusicFromStart();
+        }
+        // B returns to menu and cleans up the network
+        if (inp.bPressed) {
+            cleanupNet();
+            gameState.screen = 'menu';
+        }
+    }
+
+    function updateDefi(dt) {
+        const inp = pollScreenInput();
+        if (gameState.defiAnim < 1) {
+            gameState.defiAnim = Math.min(1, gameState.defiAnim + 1 / 30);
+        }
+        if (gameState.mode === 'solo') {
+            if (inp.aPressed && gameState.defiAnim >= 1) {
+                startGame();
+            }
+            if (inp.bPressed && gameState.defiAnim >= 1) {
+                gameState.screen = 'menu';
+            }
+        } else {
+            // Multi: wait for both players to press A
+            if (inp.aPressed && gameState.defiAnim >= 1 && !gameState.defiSelfReady) {
+                gameState.defiSelfReady = true;
+                if (net.isHost) {
+                    gameState.defiReadyCount = Math.min(2, gameState.defiReadyCount + 1);
+                    if (gameState.defiReadyCount >= 2) {
+                        netSend({ type: 'start_game' });
+                        startGame();
+                    }
+                } else {
+                    // Joiner notifies host
+                    netSend({ type: 'defi_ready' });
+                }
+            }
+            // B in multi: bail back to menu (and disconnect)
+            if (inp.bPressed && gameState.defiAnim >= 1) {
+                cleanupNet();
+                gameState.screen = 'menu';
+            }
+        }
+    }
+
+    function renderMenu() {
+        const cw = canvas.width, ch = canvas.height;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, cw, ch);
+        const bg = images.menu_bg;
+        if (!bg || !bg.complete) return;
+
+        // Fit to canvas while preserving aspect ratio (cover)
+        const ratio = Math.max(cw / bg.width, ch / bg.height);
+        const dw = bg.width * ratio;
+        const dh = bg.height * ratio;
+        const dx = (cw - dw) / 2;
+        const dy = (ch - dh) / 2;
+        ctx.drawImage(bg, dx, dy, dw, dh);
+
+        // Selection boxes positioned in the image's own coordinate system,
+        // then mapped to canvas via the same (dx,dy,ratio) transform.
+        // Calibrated against the menu.png layout (text positions in source image).
+        // Image-space rectangle for "MODE SOLO":
+        // Each option has its own rectangle so different text widths can be framed properly.
+        const imgBoxH = bg.height * 0.11;
+        // MODE SOLO (shorter)
+        const soloBoxX = bg.width * 0.46;
+        const soloBoxW = bg.width * 0.34;
+        const soloBoxY = bg.height * 0.57;
+        // MULTIJOUEUR (longer)
+        const multiBoxX = bg.width * 0.40;
+        const multiBoxW = bg.width * 0.44;
+        const multiBoxY = bg.height * 0.68;
+
+        const sel = gameState.menuSelection === 0
+            ? { x: soloBoxX, y: soloBoxY, w: soloBoxW, h: imgBoxH }
+            : { x: multiBoxX, y: multiBoxY, w: multiBoxW, h: imgBoxH };
+
+        // Map to canvas coordinates
+        const boxX = dx + sel.x * ratio;
+        const boxY = dy + sel.y * ratio;
+        const boxW = sel.w * ratio;
+        const boxH = sel.h * ratio;
+
+        ctx.save();
+        const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 200);
+        ctx.strokeStyle = '#5a2a8c';
+        ctx.lineWidth = 6 * pulse;
+        ctx.shadowColor = 'rgba(90, 42, 140, 0.6)';
+        ctx.shadowBlur = 16 * pulse;
+        const r = 12;
+        ctx.beginPath();
+        ctx.moveTo(boxX + r, boxY);
+        ctx.lineTo(boxX + boxW - r, boxY);
+        ctx.quadraticCurveTo(boxX + boxW, boxY, boxX + boxW, boxY + r);
+        ctx.lineTo(boxX + boxW, boxY + boxH - r);
+        ctx.quadraticCurveTo(boxX + boxW, boxY + boxH, boxX + boxW - r, boxY + boxH);
+        ctx.lineTo(boxX + r, boxY + boxH);
+        ctx.quadraticCurveTo(boxX, boxY + boxH, boxX, boxY + boxH - r);
+        ctx.lineTo(boxX, boxY + r);
+        ctx.quadraticCurveTo(boxX, boxY, boxX + r, boxY);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function renderLobby() {
+        const cw = canvas.width, ch = canvas.height;
+        // Background
+        ctx.fillStyle = '#f4c41e';
+        ctx.fillRect(0, 0, cw, ch);
+        // Orange band at the top
+        ctx.fillStyle = '#e8a017';
+        ctx.fillRect(0, 0, cw, ch * 0.13);
+
+        // Title
+        ctx.fillStyle = '#5a2a8c';
+        ctx.font = 'bold ' + Math.floor(ch * 0.07) + 'px "Comic Sans MS", cursive';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('RECHERCHE RAPIDE', cw / 2, ch * 0.065);
+
+        // Status message (search progress)
+        ctx.font = 'bold ' + Math.floor(ch * 0.035) + 'px "Comic Sans MS", cursive';
+        ctx.fillStyle = '#5a2a8c';
+        const dots = '.'.repeat(Math.floor(Date.now() / 400) % 4);
+        let statusText = net.searchMessage;
+        if (net.searchStatus === 'searching' || net.searchStatus === 'hosting' || net.searchStatus === 'connecting') {
+            statusText = statusText + dots;
+        }
+        ctx.fillText(statusText, cw / 2, ch * 0.20);
+
+        // Player list (2 rows)
+        const listY = ch * 0.30;
+        const rowH = ch * 0.12;
+        const listW = Math.min(cw * 0.7, 700);
+        const listX = (cw - listW) / 2;
+        const players = [
+            { nickname: net.nickname || 'Toi', present: true, isHost: net.isHost },
+            { nickname: net.connected ? (net.peerNickname || 'Joueur 2') : '', present: net.connected, isHost: !net.isHost && net.connected },
+        ];
+        // If host hasn't matched yet, first row is always us
+        if (!net.isHost && net.connected) {
+            // Joiner: peer (the host) goes first
+            players[0] = { nickname: net.peerNickname || 'Joueur 1', present: true, isHost: true };
+            players[1] = { nickname: net.nickname || 'Toi', present: true, isHost: false };
+        }
+
+        for (let i = 0; i < 2; i++) {
+            const p = players[i];
+            const ry = listY + i * (rowH + 8);
+            // Row background
+            ctx.fillStyle = p.present ? '#fff4b8' : '#e8c878';
+            ctx.strokeStyle = '#5a2a8c';
+            ctx.lineWidth = 3;
+            roundRect(ctx, listX, ry, listW, rowH, 12);
+            ctx.fill();
+            ctx.stroke();
+
+            // Avatar (titeuf head)
+            const avSize = rowH * 0.85;
+            const avX = listX + 10;
+            const avY = ry + (rowH - avSize) / 2;
+            if (p.present && images.hud_tete) {
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(images.hud_tete, avX, avY, avSize, avSize);
+            } else {
+                ctx.fillStyle = '#cca830';
+                ctx.fillRect(avX, avY, avSize, avSize);
+            }
+
+            // Nickname
+            ctx.font = 'bold ' + Math.floor(rowH * 0.42) + 'px "Comic Sans MS", cursive';
+            ctx.fillStyle = '#5a2a8c';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            const nickX = avX + avSize + 20;
+            ctx.fillText(p.present ? p.nickname : 'En attente...', nickX, ry + rowH / 2);
+
+            // Host badge
+            if (p.present && p.isHost) {
+                ctx.font = 'bold ' + Math.floor(rowH * 0.28) + 'px "Comic Sans MS", cursive';
+                ctx.fillStyle = '#c00';
+                ctx.textAlign = 'right';
+                ctx.fillText('HOTE', listX + listW - 20, ry + rowH / 2);
+            }
+        }
+
+        // Bottom instructions
+        ctx.font = 'bold ' + Math.floor(ch * 0.03) + 'px "Comic Sans MS", cursive';
+        ctx.fillStyle = '#5a2a8c';
+        ctx.textAlign = 'center';
+        if (net.isHost && net.connected) {
+            ctx.fillText('Appuie sur A pour d\u00e9marrer  \u2014  B pour annuler', cw / 2, ch * 0.90);
+        } else if (net.connected) {
+            ctx.fillText('En attente de l\u2019h\u00f4te  \u2014  B pour annuler', cw / 2, ch * 0.90);
+        } else {
+            ctx.fillText('B pour annuler', cw / 2, ch * 0.90);
+        }
+    }
+
+    // Helper for rounded rect (used by lobby)
+    function roundRect(c, x, y, w, h, r) {
+        c.beginPath();
+        c.moveTo(x + r, y);
+        c.lineTo(x + w - r, y);
+        c.quadraticCurveTo(x + w, y, x + w, y + r);
+        c.lineTo(x + w, y + h - r);
+        c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        c.lineTo(x + r, y + h);
+        c.quadraticCurveTo(x, y + h, x, y + h - r);
+        c.lineTo(x, y + r);
+        c.quadraticCurveTo(x, y, x + r, y);
+        c.closePath();
+    }
+
+    function renderDefi() {
+        const cw = canvas.width, ch = canvas.height;
+        ctx.fillStyle = '#f4c41e'; // match defi page background
+        ctx.fillRect(0, 0, cw, ch);
+        const bg = images.defi_bg;
+        if (bg && bg.complete) {
+            // Slide down animation: panel falls from above
+            const ease = 1 - Math.pow(1 - gameState.defiAnim, 3); // ease-out cubic
+            const ratio = Math.max(cw / bg.width, ch / bg.height);
+            const dw = bg.width * ratio;
+            const dh = bg.height * ratio;
+            const finalY = (ch - dh) / 2;
+            const startY = -dh;
+            const dy = startY + (finalY - startY) * ease;
+            ctx.drawImage(bg, (cw - dw) / 2, dy, dw, dh);
+        }
+    }
+
+    // Restart music from beginning (used when entering defi screen)
+    function restartMusicFromStart() {
+        const m = sounds.music_classe;
+        if (!m) return;
+        try {
+            m.currentTime = 0;
+            m.play().catch(() => {});
+        } catch (_) {}
+        musicStarted = true;
+    }
+
+    // Reset the game world and transition to playing.
+    // In multi mode, players spawn at different positions based on host/joiner role.
+    function startGame() {
+        if (gameState.mode === 'multi') {
+            if (net.isHost) {
+                player.x = 350; player.y = 280;
+                remotePlayer.x = 450; remotePlayer.y = 280;
+            } else {
+                player.x = 450; player.y = 280;
+                remotePlayer.x = 350; remotePlayer.y = 280;
+            }
+            remotePlayer.active = true;
+        } else {
+            player.x = 350; player.y = 280;
+            remotePlayer.active = false;
+        }
+        // Reset gameplay state
+        player.health = 3;
+        player.score = 0;
+        player.panique = false;
+        player.mashCount = 0;
+        player.gifleActive = false;
+        player.headBlink = 0;
+        player.scorePopup = null;
+        inventory.item = null;
+        inventory.owned = [];
+        inventory.showAnimActive = false;
+        // Reset world items
+        for (const item of worldItems) {
+            item.x = item.spawnX; item.y = item.spawnY;
+            item.picked = false;
+            item.dropped = false;
+            item.respawnTimer = 0;
+            item.pickupCooldown = 0;
+        }
+        // Reset health pickup
+        healthPickup.picked = false;
+        healthPickup.respawnTimer = 0;
+        // Reset NPCs
+        for (const npc of npcs) {
+            if (!npc.patrol) continue;
+            npc.state = 'idle';
+            npc.patrolIndex = 0;
+            npc.waitTimer = 180;
+            npc.vigilance = 'calm';
+            npc.angrySpeedTimer = 0;
+            npc.path = null;
+            npc.comboCount = 0;
+            npc.x = npc.patrol[0].x;
+            npc.y = npc.patrol[0].y;
+        }
+        gameState.screen = 'game';
+    }
+
+    function gameLoop(timestamp) {
+        if (!lastTime) lastTime = timestamp;
+        const elapsed = timestamp - lastTime;
+        lastTime = timestamp;
+        accumulator += elapsed;
+        while (accumulator >= FRAME_TIME) {
+            if (gameState.screen === 'menu') updateMenu(FRAME_TIME);
+            else if (gameState.screen === 'lobby') updateLobby(FRAME_TIME);
+            else if (gameState.screen === 'defi') updateDefi(FRAME_TIME);
+            else update(FRAME_TIME);
+            accumulator -= FRAME_TIME;
+        }
+        if (gameState.screen === 'menu') renderMenu();
+        else if (gameState.screen === 'lobby') renderLobby();
+        else if (gameState.screen === 'defi') renderDefi();
+        else render();
+        requestAnimationFrame(gameLoop);
+    }
+
+    async function init() {
+        resize();
+        loadSounds();
+        await loadImages();
+        startMusic(); // try immediate; if blocked by autoplay policy, the keyboard/gamepad fallbacks remain
+        requestAnimationFrame(gameLoop);
+    }
+
+    init();
+})();
+</script>
+</body>
+</html>
