@@ -405,6 +405,7 @@ canvas {
         frame: 0,
         currentAnim: 'idle',
         panique: false,
+        scorePopup: null,
     };
     const camera = { x: 350, y: 280 };
 
@@ -669,6 +670,17 @@ canvas {
                 sliding: true,
                 ghost: true,
             });
+        } else if (msg.type === 'score_event') {
+            // Host -> joiner: you scored, add the points + show popup over yourself.
+            if (typeof msg.pts === 'number') {
+                player.score += msg.pts;
+                player.scorePopup = { text: '+' + msg.pts, timer: 180 };
+            }
+        } else if (msg.type === 'remote_score_popup') {
+            // Host -> joiner: the OTHER player (host) just scored. Show a popup over their Titeuf.
+            if (typeof msg.pts === 'number') {
+                remotePlayer.scorePopup = { text: '+' + msg.pts, timer: 180 };
+            }
         }
     }
 
@@ -1506,6 +1518,10 @@ canvas {
             player.scorePopup.timer--;
             if (player.scorePopup.timer <= 0) player.scorePopup = null;
         }
+        if (remotePlayer.scorePopup) {
+            remotePlayer.scorePopup.timer--;
+            if (remotePlayer.scorePopup.timer <= 0) remotePlayer.scorePopup = null;
+        }
 
         // Camera follows Titeuf exactly. The render-side clamping keeps it inside
         // the map bounds, so near a border Titeuf naturally drifts off-center.
@@ -1830,8 +1846,24 @@ canvas {
                     const n = npc.comboCount || 0;
                     if (n > 0) {
                         const pts = n === 1 ? 2 : n * 8;
-                        player.score += pts;
-                        player.scorePopup = { text: '+' + pts, timer: 180 }; // 3s
+                        if (gameState.mode === 'multi') {
+                            // Award to whoever provoked the slide
+                            if (npc.angryAt === 'remote') {
+                                // The joiner scored: tell them to add points + popup,
+                                // and locally show a popup over their (remote) Titeuf.
+                                netSend({ type: 'score_event', pts: pts });
+                                remotePlayer.scorePopup = { text: '+' + pts, timer: 180 };
+                            } else {
+                                // Host scored.
+                                player.score += pts;
+                                player.scorePopup = { text: '+' + pts, timer: 180 };
+                                // Tell the joiner to display a popup over our Titeuf too.
+                                netSend({ type: 'remote_score_popup', pts: pts });
+                            }
+                        } else {
+                            player.score += pts;
+                            player.scorePopup = { text: '+' + pts, timer: 180 };
+                        }
                     }
                     npc.comboCount = 0;
                 }
@@ -2931,13 +2963,12 @@ canvas {
         */
 
         // Score popup over Titeuf's head (in world space, inside camera transform)
-        if (player.scorePopup) {
-            const total = 180; // 3 seconds at 60fps
-            const t = player.scorePopup.timer / total; // 1 → 0
-            // Rises a bit while displayed (smooth ease-out)
-            const progress = 1 - t; // 0 → 1
-            const yOffset = -72 - progress * 18; // -72 → -90
-            // Fade out only at the very end
+        function drawScorePopup(ent) {
+            if (!ent.scorePopup) return;
+            const total = 180;
+            const t = ent.scorePopup.timer / total;
+            const progress = 1 - t;
+            const yOffset = -72 - progress * 18;
             const alpha = t < 0.25 ? t * 4 : 1;
             ctx.save();
             ctx.globalAlpha = alpha;
@@ -2947,12 +2978,14 @@ canvas {
             ctx.lineWidth = 3;
             ctx.strokeStyle = '#000';
             ctx.fillStyle = '#FFFFFF';
-            const px = player.x;
-            const py = player.y + yOffset;
-            ctx.strokeText(player.scorePopup.text, px, py);
-            ctx.fillText(player.scorePopup.text, px, py);
+            const px = ent.x;
+            const py = ent.y + yOffset;
+            ctx.strokeText(ent.scorePopup.text, px, py);
+            ctx.fillText(ent.scorePopup.text, px, py);
             ctx.restore();
         }
+        drawScorePopup(player);
+        if (remotePlayer.active) drawScorePopup(remotePlayer);
 
         ctx.restore();
 
