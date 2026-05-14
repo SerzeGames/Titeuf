@@ -656,6 +656,7 @@ canvas {
             if (entry && !entry.picked) {
                 entry.picked = true;
                 entry.dropped = false;
+                entry.droppedBy = null; // forget previous trap owner
                 entry.respawnTimer = 0;
             }
         } else if (msg.type === 'request_drop') {
@@ -1019,6 +1020,7 @@ canvas {
             item.y = s.y;
             item.picked = false;
             item.dropped = false;
+            item.droppedBy = null;
             item.respawnTimer = 0;
             item.pickupCooldown = 0;
             item._localPickCooldown = 0;
@@ -2794,6 +2796,10 @@ canvas {
                     entry.picked = false;
                     entry.respawnTimer = 0;
                     entry.dropped = true;
+                    // Mark THIS player as the one who placed the trap, so when the
+                    // NPC trips on it later we blame the right player (even if they
+                    // already walked far away / off the NPC's screen).
+                    entry.droppedBy = 'local';
                     entry.pickupCooldown = 60;
                     // Multi sync
                     if (gameState.mode === 'multi' && !net.isHost) {
@@ -4096,6 +4102,7 @@ canvas {
             item.x = item.spawnX; item.y = item.spawnY;
             item.picked = false;
             item.dropped = false;
+            item.droppedBy = null;
             item.respawnTimer = 0;
             item.pickupCooldown = 0;
         }
