@@ -802,6 +802,14 @@ canvas {
                         entry.dropped = incoming.dropped;
                         continue;
                     }
+                    // If we just locally picked this item, don't let the host's
+                    // (potentially stale) world_state un-pick it and re-trigger
+                    // the pickup loop. Keep our local picked=true until the host
+                    // catches up (then incoming.picked will be true too).
+                    if (entry._localPickCooldown > 0 && entry.picked && !incoming.picked) {
+                        // Skip the picked/dropped/position overwrite for this tick.
+                        continue;
+                    }
                     entry._netTargetX = incoming.x;
                     entry._netTargetY = incoming.y;
                     if (entry._netInitialized !== true) {
@@ -815,7 +823,13 @@ canvas {
             }
         }
         if (msg.health) {
-            healthPickup.picked = msg.health.picked;
+            // Same guard as items: if joiner just locally picked HP, ignore stale
+            // un-picked world_state for a brief window.
+            if (healthPickup._localPickCooldown > 0 && healthPickup.picked && !msg.health.picked) {
+                // skip
+            } else {
+                healthPickup.picked = msg.health.picked;
+            }
         }
     }
 
@@ -2257,9 +2271,15 @@ canvas {
         // ========== ITEMS ==========
         // Pickup: check if player is near a world item.
         // Each item has its own pickupCooldown (set when Titeuf drops it) so he doesn't
-        // immediately re-grab a freshly placed trap.
+        // Items: pickup detection.
+        // Note: the host is authoritative for the world state, but the joiner detects
+        // its own collisions locally for snappy response. Once picked locally, we set
+        // a small _localPickCooldown so the next world_state messages (which may
+        // arrive before the host has processed our request_pickup) don't reset
+        // item.picked to false and re-trigger the pickup -> sound spam.
         for (const item of worldItems) {
             if (item.pickupCooldown > 0) item.pickupCooldown--;
+            if (item._localPickCooldown > 0) item._localPickCooldown--;
             if (item.picked) continue;
             if (item.pickupCooldown > 0) continue;
             const dx = player.x - item.x;
@@ -2276,6 +2296,7 @@ canvas {
                 // Multi: notify the other side. Joiner asks host to mark as picked;
                 // host broadcasts via world_state automatically.
                 if (gameState.mode === 'multi' && !net.isHost) {
+                    item._localPickCooldown = 60; // 1s guard against stale world_state
                     netSend({ type: 'request_pickup', itemId: item.id });
                 }
             }
@@ -2287,6 +2308,7 @@ canvas {
         // healthPickup.picked received via world_state.
         const hostsThisPickup = (gameState.mode !== 'multi') || net.isHost;
         if (healthPickup.pickupCooldown > 0) healthPickup.pickupCooldown--;
+        if (healthPickup._localPickCooldown > 0) healthPickup._localPickCooldown--;
         if (healthPickup.picked) {
             if (hostsThisPickup) {
                 healthPickup.respawnTimer--;
@@ -2305,6 +2327,7 @@ canvas {
                 healthPickup.pickupCooldown = 30; // half a second guard
                 broadcastSound('loot');
                 if (gameState.mode === 'multi' && !net.isHost) {
+                    healthPickup._localPickCooldown = 60; // 1s guard against stale world_state
                     netSend({ type: 'request_health_pickup' });
                 }
             }
