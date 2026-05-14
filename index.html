@@ -1997,6 +1997,10 @@ canvas {
                 if (npc.angrySpeedTimer <= 0) {
                     npc.speed = npc.baseSpeed;
                     npc.vigilance = 'calm';
+                    // She gave up — clear the grudge so future provocations get a
+                    // fresh blame, and so the chase target falls back to "closest"
+                    // until someone provokes again.
+                    npc.angryAt = null;
                     // Find nearest patrol waypoint to resume patrol
                     if (npc.state === 'walking' || npc.state === 'poursuit') {
                         let nearestIdx = 0;
@@ -2212,8 +2216,10 @@ canvas {
                 npc._patrolStuck = 0;
                 // Reset chase sprite smoothing so next chase starts clean
                 npc._chaseDx = 0; npc._chaseDy = 0; npc._chaseCat = undefined;
-                // Clear angryAt so a future provocation isn't blamed on the previous culprit.
-                npc.angryAt = null;
+                // NOTE: do NOT reset npc.angryAt here. The NPC may still be hunting
+                // the culprit during the angry phase (patrouille accelerée). We only
+                // clear angryAt when the angrySpeedTimer expires (handled elsewhere),
+                // or when the NPC has actually slapped someone (handled after gifle).
             }
 
             if (npc.state === 'glisse') {
@@ -2408,6 +2414,8 @@ canvas {
                     npc.vigilance = 'calm';
                     npc.angrySpeedTimer = 0;
                     npc.speed = npc.baseSpeed;
+                    // She got her revenge — clear the grudge.
+                    npc.angryAt = null;
                 }
             } else if (npc.state === 'idle') {
                 const target = npc.patrol[npc.patrolIndex];
