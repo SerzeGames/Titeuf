@@ -2,36 +2,17 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#000000">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Titeuf - Ze Gag Machine</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body {
-    width: 100%; height: 100%;
-    overflow: hidden;
-    background: #000;
-    /* Prevent mobile browsers from intercepting touch as scroll/zoom */
-    touch-action: none;
-    -ms-touch-action: none;
-    -webkit-user-select: none;
-    -webkit-tap-highlight-color: transparent;
-    -webkit-touch-callout: none;
-    user-select: none;
-    overscroll-behavior: none;
-    position: fixed;
-    inset: 0;
-}
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
 canvas {
     display: block;
     width: 100vw;
     height: 100vh;
     image-rendering: pixelated;
     cursor: none;
-    touch-action: none;
 }
 #loading {
     position: fixed; inset: 0;
@@ -394,18 +375,14 @@ canvas {
         score: 0,
         scorePopup: null,    // { text: '+x', timer: frames }
     };
-    // Remote player state (multi only) — visual; positions interpolated from network.
+    // Remote player state (multi only) — purely visual; positions come over the network.
     const remotePlayer = {
-        active: false,
-        // Rendered (smoothed) position
+        active: false,           // becomes true when first net update arrives
         x: 350, y: 280,
-        // Latest target from network (we lerp toward this)
-        targetX: 350, targetY: 280,
         facingLeft: false,
         frame: 0,
         currentAnim: 'idle',
         panique: false,
-        scorePopup: null,
     };
     const camera = { x: 350, y: 280 };
 
@@ -559,128 +536,20 @@ canvas {
         } else if (msg.type === 'start_game') {
             startGame();
         } else if (msg.type === 'player_state') {
-            // Other player's transform/animation snapshot — store as interpolation target.
-            if (!remotePlayer.active) {
-                remotePlayer.x = msg.x;
-                remotePlayer.y = msg.y;
-            }
+            // Other player's transform/animation snapshot
             remotePlayer.active = true;
-            remotePlayer.targetX = msg.x;
-            remotePlayer.targetY = msg.y;
+            remotePlayer.x = msg.x;
+            remotePlayer.y = msg.y;
             remotePlayer.facingLeft = !!msg.facingLeft;
             remotePlayer.frame = msg.frame|0;
             remotePlayer.currentAnim = msg.anim || 'idle';
             remotePlayer.panique = !!msg.panique;
-            // Remote player's viewport (used for symmetric detection in multi)
-            if (msg.halfW) remotePlayer.halfW = msg.halfW;
-            if (msg.halfH) remotePlayer.halfH = msg.halfH;
         } else if (msg.type === 'world_state') {
             // Host -> joiner: snapshot of authoritative world (npc + items)
             applyWorldStateFromHost(msg);
         } else if (msg.type === 'world_event') {
             // One-shot events from host (e.g. she just slipped, item picked, etc.)
             applyWorldEvent(msg);
-        } else if (msg.type === 'request_hit_npc') {
-            // Joiner asks host to apply a hit on the maitresse.
-            if (!net.isHost) return;
-            const npc = npcs[0];
-            if (!npc) return;
-            if (npc.state === 'tombe' || npc.state === 'gifle') return;
-            const wasSliding = npc.state === 'glisse';
-            npc.state = 'glisse';
-            npc.slideKind = slideKindFor(msg.dx, msg.dy);
-            const gInfo = glisseSpriteFor(npc, npc.slideKind);
-            npc.currentSprite = gInfo.sprite;
-            npc.totalFrames = gInfo.frames;
-            if (!wasSliding) { npc.frame = 0; npc.animTimer = 0; }
-            npc.fps = 10;
-            const throwSpeed = Math.sqrt(msg.dx * msg.dx + msg.dy * msg.dy);
-            const norm = throwSpeed > 0 ? throwSpeed : 1;
-            npc.slideDx = (msg.dx / norm) * 3;
-            npc.slideDy = (msg.dy / norm) * 3;
-            npc.slideLife = 45;
-            npc.comboCount = (npc.comboCount || 0) + 1;
-            // Track that the JOINER hit her -> she'll be angry at 'remote' on host side
-            npc.angryAt = 'remote';
-            if (msg.dx !== 0) npc.facingLeft = msg.dx < 0;
-            const entry = worldItems.find(w => w.id === msg.itemId);
-            if (entry) {
-                entry.picked = true;
-                entry.respawnTimer = -1;
-            }
-            startGlisseSound();
-        } else if (msg.type === 'request_pickup') {
-            // Joiner asks host to mark an item as picked up (for sync).
-            if (!net.isHost) return;
-            const entry = worldItems.find(w => w.id === msg.itemId);
-            if (entry && !entry.picked) {
-                entry.picked = true;
-                entry.dropped = false;
-                entry.respawnTimer = 0;
-            }
-        } else if (msg.type === 'request_drop') {
-            // Joiner dropped a trap at (x,y).
-            if (!net.isHost) return;
-            const entry = worldItems.find(w => w.id === msg.itemId);
-            if (entry) {
-                entry.x = msg.x; entry.y = msg.y;
-                // IMPORTANT: do NOT overwrite spawnX/spawnY here. The item must
-                // respawn at its original spawn point, not where it landed.
-                entry.picked = false;
-                entry.dropped = true;
-                entry.respawnTimer = 0;
-            }
-        } else if (msg.type === 'request_alert') {
-            // Joiner threw an item; check if maitresse is alert toward them.
-            if (!net.isHost) return;
-            for (const n of npcs) {
-                if (!n.patrol) continue;
-                if (n.state === 'glisse' || n.state === 'tombe' || n.state === 'gifle') continue;
-                // Use vigilanceRemote for the joiner's POV
-                if ((n.vigilanceRemote || 'calm') !== 'alert') continue;
-                n.state = 'poursuit';
-                n.vigilance = 'angry';
-                n.angrySpeedTimer = 420;
-                n.angryAt = msg.by || 'remote';
-                n.frame = 0; n.animTimer = 0;
-                n.path = null; n.pathRecalcTimer = 0;
-            }
-        } else if (msg.type === 'request_health_pickup') {
-            // Joiner ramasses item_hp
-            if (!net.isHost) return;
-            if (!healthPickup.picked) {
-                healthPickup.picked = true;
-                healthPickup.respawnTimer = healthPickup.respawnDuration;
-                healthPickup.pickupCooldown = 30;
-            }
-        } else if (msg.type === 'sound_event') {
-            // Replay a sound triggered by the other player for awareness
-            if (msg.name) playSound(msg.name);
-        } else if (msg.type === 'item_throw') {
-            // The other player threw an item; create a ghost projectile so we
-            // see the same animation. Ghosts don't collide with NPCs or walls
-            // (the thrower's side is authoritative for that).
-            thrownItems.push({
-                id: msg.id,
-                sprite: msg.sprite,
-                x: msg.x, y: msg.y,
-                dx: msg.dx, dy: msg.dy,
-                life: msg.life || 55,
-                size: msg.size || 38,
-                sliding: true,
-                ghost: true,
-            });
-        } else if (msg.type === 'score_event') {
-            // Host -> joiner: you scored, add the points + show popup over yourself.
-            if (typeof msg.pts === 'number') {
-                player.score += msg.pts;
-                player.scorePopup = { text: '+' + msg.pts, timer: 180 };
-            }
-        } else if (msg.type === 'remote_score_popup') {
-            // Host -> joiner: the OTHER player (host) just scored. Show a popup over their Titeuf.
-            if (typeof msg.pts === 'number') {
-                remotePlayer.scorePopup = { text: '+' + msg.pts, timer: 180 };
-            }
         }
     }
 
@@ -701,18 +570,16 @@ canvas {
             frame: player.frame,
             anim: player.currentAnim,
             panique: player.panique,
-            // Local viewport so host can apply detection using THIS player's screen size
-            halfW: canvas.width / (2 * CONFIG.CAMERA_ZOOM),
-            halfH: canvas.height / (2 * CONFIG.CAMERA_ZOOM),
         });
     }
 
-    // Host -> joiner authoritative state snapshot (~30 Hz)
+    // Host -> joiner authoritative state snapshot
     function netTickWorldState() {
         if (gameState.mode !== 'multi' || !net.isHost) return;
         if (!net.conn || !net.conn.open) return;
+        // Throttle ~15 Hz
         netWorldTickCounter++;
-        if (netWorldTickCounter < 2) return;
+        if (netWorldTickCounter < 4) return;
         netWorldTickCounter = 0;
         const npc = npcs[0];
         if (!npc) return;
@@ -724,11 +591,8 @@ canvas {
                 facingLeft: npc.facingLeft,
                 state: npc.state,
                 vigilance: npc.vigilance,
-                vigilanceLocal: npc.vigilanceLocal || 'calm',
-                vigilanceRemote: npc.vigilanceRemote || 'calm',
                 slideKind: npc.slideKind || 'h',
                 frame: npc.frame,
-                fps: npc.fps,
                 currentSprite: npc.currentSprite,
                 totalFrames: npc.totalFrames,
                 target: npc.chaseTarget || null,
@@ -748,41 +612,20 @@ canvas {
     let netWorldTickCounter = 0;
 
     function applyWorldStateFromHost(msg) {
-        // Apply NPC state — interpolate positions, advance frames locally.
+        // Apply NPC state
         const npc = npcs[0];
         if (npc && msg.npc) {
             const prevState = npc.state;
-            npc._netTargetX = msg.npc.x;
-            npc._netTargetY = msg.npc.y;
-            if (npc._netInitialized !== true) {
-                npc.x = msg.npc.x;
-                npc.y = msg.npc.y;
-                npc._netInitialized = true;
-            }
+            npc.x = msg.npc.x;
+            npc.y = msg.npc.y;
             npc.facingLeft = msg.npc.facingLeft;
-            // Vigilance: host's "local" view is for the host. From joiner's perspective, swap.
-            if (msg.npc.vigilanceLocal !== undefined) {
-                npc.vigilanceRemote = msg.npc.vigilanceLocal;
-                npc.vigilanceLocal = msg.npc.vigilanceRemote || 'calm';
-            }
-            // Display vigilance = what THIS player sees
-            npc.vigilance = npc.vigilanceLocal || msg.npc.vigilance;
-            npc.slideKind = msg.npc.slideKind || 'h';
-            // Store the chaseTarget tag exactly as host sent it.
-            // Inversion is handled in getChaseTarget() when needed.
-            npc.chaseTarget = msg.npc.target;
-            // State / sprite resets the frame counter to avoid jumps,
-            // but only when state OR sprite changes.
-            const stateChanged = prevState !== msg.npc.state;
-            const spriteChanged = npc.currentSprite !== msg.npc.currentSprite;
             npc.state = msg.npc.state;
+            npc.vigilance = msg.npc.vigilance;
+            npc.slideKind = msg.npc.slideKind || 'h';
+            npc.frame = msg.npc.frame;
             npc.currentSprite = msg.npc.currentSprite;
             npc.totalFrames = msg.npc.totalFrames;
-            if (msg.npc.fps) npc.fps = msg.npc.fps;
-            if (stateChanged || spriteChanged) {
-                npc.frame = msg.npc.frame;
-                npc.animTimer = 0;
-            }
+            npc.chaseTarget = msg.npc.target;
             // State transition side-effects (sounds)
             if (prevState !== 'glisse' && npc.state === 'glisse') {
                 startGlisseSound();
@@ -796,24 +639,14 @@ canvas {
             for (const incoming of msg.items) {
                 const entry = worldItems.find(w => w.id === incoming.id);
                 if (entry) {
-                    // If we just locally dropped this item, ignore host's stale position for a moment.
-                    if (entry._localDropCooldown > 0) {
-                        entry.picked = incoming.picked;
-                        entry.dropped = incoming.dropped;
-                        continue;
-                    }
-                    entry._netTargetX = incoming.x;
-                    entry._netTargetY = incoming.y;
-                    if (entry._netInitialized !== true) {
-                        entry.x = incoming.x;
-                        entry.y = incoming.y;
-                        entry._netInitialized = true;
-                    }
+                    entry.x = incoming.x;
+                    entry.y = incoming.y;
                     entry.picked = incoming.picked;
                     entry.dropped = incoming.dropped;
                 }
             }
         }
+        // Health pickup
         if (msg.health) {
             healthPickup.picked = msg.health.picked;
         }
@@ -922,7 +755,6 @@ canvas {
         picked: false,
         respawnTimer: 0,         // counts down while picked; respawns when 0
         respawnDuration: 60 * 60, // 60s
-        pickupCooldown: 0,       // local cooldown to avoid double-trigger
     };
     // Exit arrow above the top-left door. Becomes animated yellow once 8+ points reached.
     const exitArrow = {
@@ -1076,6 +908,11 @@ canvas {
                 maitresse_poursuit_diag_bas: 'images/maitresse_poursuit_diag_bas.png',
                 maitresse_gifle: 'images/maitresse_gifle.png',
                 titeuf_gifle: 'images/titeuf_gifle.png',
+                point_bleu: 'images/pointbleu.png',
+                point_jaune: 'images/pointjaune.png',
+                point_rouge: 'images/pointrouge.png',
+                point_excla: 'images/pointexcla.png',
+                confusion_etoiles: 'images/etoiles_confusion.png',
             };
             const total = Object.keys(sources).length;
             let count = 0;
@@ -1131,17 +968,6 @@ canvas {
         const m = sounds.music_classe;
         if (!m) return;
         m.play().then(() => { musicStarted = true; }).catch(() => {});
-    }
-
-    // Play a sound locally AND propagate it to the peer in multi.
-    // Use this for sounds the other player should hear from your actions
-    // (loot, drop, etc.). Don't use for sounds already implied by sync state
-    // (glisse, tombe, gifle on the chased target).
-    function broadcastSound(name, volume) {
-        playSound(name, volume);
-        if (gameState.mode === 'multi' && net.conn && net.conn.open) {
-            netSend({ type: 'sound_event', name });
-        }
     }
 
     // Looping glisse sound helpers
@@ -1374,17 +1200,16 @@ canvas {
             return tag === 'remote' ? player : remotePlayer;
         }
     }
-    // Host-only: choose chase target based on who provoked her (angryAt).
-    // Falls back to closest only if no one provoked yet.
+    // Host-only: choose/refresh the chase target based on visibility & distance.
     function updateChaseTarget(npc) {
         if (gameState.mode !== 'multi' || !net.isHost) return;
         if (!remotePlayer.active) { npc.chaseTarget = 'local'; return; }
-        // Use angryAt as the source of truth (set when she was hit)
-        if (npc.angryAt === 'local' || npc.angryAt === 'remote') {
-            npc.chaseTarget = npc.angryAt;
-            return;
-        }
-        // Fallback: closest
+        // If we already have a target and it's still on-screen (within reasonable range), keep it
+        const currentTag = npc.chaseTarget;
+        const current = currentTag === 'remote' ? remotePlayer : player;
+        const dCur = Math.hypot(current.x - npc.x, current.y - npc.y);
+        if (currentTag && dCur < 350) return; // sticky
+        // Otherwise pick closest
         const dL = Math.hypot(player.x - npc.x, player.y - npc.y);
         const dR = Math.hypot(remotePlayer.x - npc.x, remotePlayer.y - npc.y);
         npc.chaseTarget = dR < dL ? 'remote' : 'local';
@@ -1392,14 +1217,6 @@ canvas {
     function update(dt) {
         const input = getInput();
         const raw = getRawInput();
-
-        // Smooth interpolation of the remote player toward its latest network target.
-        // Lerp factor 0.25 = quick catch-up while staying smooth.
-        if (remotePlayer.active) {
-            const k = 0.25;
-            remotePlayer.x += (remotePlayer.targetX - remotePlayer.x) * k;
-            remotePlayer.y += (remotePlayer.targetY - remotePlayer.y) * k;
-        }
 
         // Detect panique: any NPC currently chasing THIS player triggers panic mode.
         // In multi, the maitresse only panics the player she's actually chasing.
@@ -1518,10 +1335,6 @@ canvas {
             player.scorePopup.timer--;
             if (player.scorePopup.timer <= 0) player.scorePopup = null;
         }
-        if (remotePlayer.scorePopup) {
-            remotePlayer.scorePopup.timer--;
-            if (remotePlayer.scorePopup.timer <= 0) remotePlayer.scorePopup = null;
-        }
 
         // Camera follows Titeuf exactly. The render-side clamping keeps it inside
         // the map bounds, so near a border Titeuf naturally drifts off-center.
@@ -1535,36 +1348,17 @@ canvas {
         if (skipNpcSim) {
             for (const npc of npcs) {
                 if (!npc.patrol) continue;
-                // Smooth interpolation toward host-provided target
-                if (npc._netTargetX !== undefined) {
-                    const k = 0.25;
-                    npc.x += (npc._netTargetX - npc.x) * k;
-                    npc.y += (npc._netTargetY - npc.y) * k;
-                }
-                // Advance animation frame locally (smoother than reading 15Hz host frames)
-                npc.animTimer += (npc.fps || 6) / 60;
-                if (npc.animTimer >= 1) {
+                // Just advance animation frame
+                npc.animTimer++;
+                if (npc.animTimer >= 60 / (npc.fps || 6)) {
                     npc.animTimer = 0;
+                    npc.frame++;
                     const maxF = npc.totalFrames || 1;
                     if (npc.state === 'tombe') {
-                        if (npc.frame < 5) npc.frame = Math.min(5, npc.frame + 1);
-                    } else if (npc.state === 'gifle' || npc.state === 'idle') {
-                        if (npc.frame < maxF - 1) npc.frame++;
-                    } else {
-                        npc.frame = (npc.frame + 1) % maxF;
+                        if (npc.frame >= 5) npc.frame = 5; // freeze at last
+                    } else if (npc.frame >= maxF) {
+                        npc.frame = 0;
                     }
-                }
-            }
-            // Also interpolate items (skip those in local drop cooldown so they stay put)
-            for (const item of worldItems) {
-                if (item._localDropCooldown > 0) {
-                    item._localDropCooldown--;
-                    continue;
-                }
-                if (item._netTargetX !== undefined) {
-                    const k = 0.30;
-                    item.x += (item._netTargetX - item.x) * k;
-                    item.y += (item._netTargetY - item.y) * k;
                 }
             }
         } else {
@@ -1618,58 +1412,23 @@ canvas {
                 }
             }
 
-            // Check if maitresse is "on screen" — used for solo difficulty parity.
-            // Uses the local player's actual viewport (canvas size + camera zoom).
+            // Check if maitresse is "on screen" — used to decide when she gives up chasing.
+            // In multi: she stays "on screen" as long as she's near any player.
             const halfViewW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
             const halfViewH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
             const margin = npc.angrySpeedTimer > 0 ? 30 : 0;
             let maitresseOnScreen;
             if (gameState.mode === 'multi' && remotePlayer.active) {
-                // Visible if near EITHER player, using each one's own viewport.
-                const halfW2 = remotePlayer.halfW || halfViewW;
-                const halfH2 = remotePlayer.halfH || halfViewH;
-                const nearLocal = Math.abs(npc.x - player.x) < halfViewW + margin && Math.abs(npc.y - player.y) < halfViewH + margin;
-                const nearRemote = Math.abs(npc.x - remotePlayer.x) < halfW2 + margin && Math.abs(npc.y - remotePlayer.y) < halfH2 + margin;
-                maitresseOnScreen = nearLocal || nearRemote;
+                // Visible if near either player
+                const near = (px, py) => Math.abs(npc.x - px) < halfViewW + margin && Math.abs(npc.y - py) < halfViewH + margin;
+                maitresseOnScreen = near(player.x, player.y) || near(remotePlayer.x, remotePlayer.y);
             } else {
                 const mOnScreenX = Math.abs(npc.x - camera.x) < halfViewW + margin;
                 const mOnScreenY = Math.abs(npc.y - camera.y) < halfViewH + margin;
                 maitresseOnScreen = mOnScreenX && mOnScreenY;
             }
 
-            // Helper: "near culprit" = the maitresse is on the culprit's screen.
-            // Uses each player's actual viewport size for fair, solo-equivalent detection.
-            const culpritOnScreen = () => {
-                if (gameState.mode !== 'multi') return maitresseOnScreen;
-                let culprit;
-                if (npc.angryAt === 'remote') {
-                    culprit = remotePlayer;
-                } else if (npc.angryAt === 'local') {
-                    culprit = player;
-                } else {
-                    if (!remotePlayer.active) culprit = player;
-                    else {
-                        const dL = Math.hypot(player.x - npc.x, player.y - npc.y);
-                        const dR = Math.hypot(remotePlayer.x - npc.x, remotePlayer.y - npc.y);
-                        culprit = dR < dL ? remotePlayer : player;
-                    }
-                }
-                if (!culprit || culprit.active === false) return maitresseOnScreen;
-                // Each player has their own viewport. For the local player we use canvas;
-                // for the remote we use the halfW/halfH they broadcast (falls back to local).
-                let halfW, halfH;
-                if (culprit === player) {
-                    halfW = canvas.width / (2 * CONFIG.CAMERA_ZOOM);
-                    halfH = canvas.height / (2 * CONFIG.CAMERA_ZOOM);
-                } else {
-                    halfW = culprit.halfW || (canvas.width / (2 * CONFIG.CAMERA_ZOOM));
-                    halfH = culprit.halfH || (canvas.height / (2 * CONFIG.CAMERA_ZOOM));
-                }
-                const margin = npc.angrySpeedTimer > 0 ? 30 : 0;
-                return Math.abs(npc.x - culprit.x) < halfW + margin &&
-                       Math.abs(npc.y - culprit.y) < halfH + margin;
-            };
-
+            // Helper: try to move NPC using A* pathfinding, with wall-following fallback.
             // Path is recomputed periodically or when target moved significantly.
             function moveNpcToward(npc, targetX, targetY, moveSpeed) {
                 const mdx = targetX - npc.x;
@@ -1846,24 +1605,8 @@ canvas {
                     const n = npc.comboCount || 0;
                     if (n > 0) {
                         const pts = n === 1 ? 2 : n * 8;
-                        if (gameState.mode === 'multi') {
-                            // Award to whoever provoked the slide
-                            if (npc.angryAt === 'remote') {
-                                // The joiner scored: tell them to add points + popup,
-                                // and locally show a popup over their (remote) Titeuf.
-                                netSend({ type: 'score_event', pts: pts });
-                                remotePlayer.scorePopup = { text: '+' + pts, timer: 180 };
-                            } else {
-                                // Host scored.
-                                player.score += pts;
-                                player.scorePopup = { text: '+' + pts, timer: 180 };
-                                // Tell the joiner to display a popup over our Titeuf too.
-                                netSend({ type: 'remote_score_popup', pts: pts });
-                            }
-                        } else {
-                            player.score += pts;
-                            player.scorePopup = { text: '+' + pts, timer: 180 };
-                        }
+                        player.score += pts;
+                        player.scorePopup = { text: '+' + pts, timer: 180 }; // 3s
                     }
                     npc.comboCount = 0;
                 }
@@ -1875,14 +1618,14 @@ canvas {
                 if (npc.frame >= 5) npc.frame = 5;
                 npc.tombeTimer--;
                 if (npc.tombeTimer <= 0) {
-                    npc.angrySpeedTimer = 420;
+                    npc.angrySpeedTimer = 420; // 7 seconds angry
                     npc.vigilance = 'angry';
-                    if (culpritOnScreen()) {
+                    if (maitresseOnScreen) {
                         npc.state = 'poursuit';
                     } else {
                         resumePatrol(true);
                     }
-                    npc.slideKind = 'h';
+                    npc.slideKind = 'h'; // reset for next time
                     npc.frame = 0; npc.animTimer = 0;
                     npc.fps = 6;
                 }
@@ -1937,38 +1680,23 @@ canvas {
                     npc.state = 'gifle';
                     npc.frame = 0; npc.animTimer = 0;
                     npc.tombeTimer = 48;
-                    // Apply damage to the right player; play gifle sound on both sides.
+                    // Apply damage to the right player
                     if (target === player) {
                         player.gifleActive = true;
                         player.gifleTimer = 48;
                         player.health = Math.max(0, player.health - 1);
                         player.headBlink = 120;
                         player.frame = 0; player.animTimer = 0;
-                        // We're slapped: broadcast so the peer hears it too.
-                        broadcastSound('gifle');
+                        playSound('gifle');
                     } else {
-                        // Target is the remote player. Notify them; the world_event
-                        // will play the sound on their side, so we just play locally here.
+                        // Target is the remote player. Notify them.
                         netSend({ type: 'world_event', event: 'gifle_remote' });
                         playSound('gifle');
                     }
                 }
 
-                // Target off screen (from THEIR own viewport): switch to angry patrol.
-                let stillVisible = maitresseOnScreen;
-                if (gameState.mode === 'multi') {
-                    const t = target;
-                    let halfW, halfH;
-                    if (t === player) {
-                        halfW = halfViewW; halfH = halfViewH;
-                    } else {
-                        halfW = t.halfW || halfViewW;
-                        halfH = t.halfH || halfViewH;
-                    }
-                    stillVisible = Math.abs(npc.x - t.x) < halfW + margin &&
-                                   Math.abs(npc.y - t.y) < halfH + margin;
-                }
-                if (!stillVisible) {
+                // Target off screen (from her perspective): switch to angry patrol
+                if (!maitresseOnScreen) {
                     resumePatrol(true);
                 }
             } else if (npc.state === 'gifle') {
@@ -1996,7 +1724,7 @@ canvas {
                     npc.frame = 0; npc.animTimer = 0;
                 }
                 // If angry and player appears on screen, pursue!
-                if (npc.angrySpeedTimer > 0 && culpritOnScreen()) {
+                if (npc.angrySpeedTimer > 0 && maitresseOnScreen) {
                     npc.state = 'poursuit';
                     npc.frame = 0; npc.animTimer = 0;
                 }
@@ -2089,7 +1817,7 @@ canvas {
                 }
 
                 // If angry and player appears on screen, pursue!
-                if (npc.angrySpeedTimer > 0 && culpritOnScreen()) {
+                if (npc.angrySpeedTimer > 0 && maitresseOnScreen) {
                     npc.state = 'poursuit';
                     npc.frame = 0; npc.animTimer = 0;
                 }
@@ -2113,60 +1841,33 @@ canvas {
                 }
             }
 
-            // Vigilance: per-player in multi, single value in solo.
-            // angryAt is set when someone hits her and persists during angry timer.
+            // Vigilance color
             if (npc.angrySpeedTimer > 0) {
-                // Only the player who made her angry sees red; the other sees calm/alert based on his own visibility
-                const angryTag = npc.angryAt || 'local';
-                if (gameState.mode === 'multi') {
-                    npc.vigilanceLocal = (angryTag === 'local') ? 'angry' : 'calm';
-                    npc.vigilanceRemote = (angryTag === 'remote') ? 'angry' : 'calm';
-                    // For the angry target, even calm vigilance doesn't apply (she's red).
-                    // For the other player, compute alert/calm normally based on visibility.
-                    const computeAlert = (t) => {
-                        if (!t) return 'calm';
-                        const vdx = t.x - npc.x, vdy = t.y - npc.y;
-                        const vdist = Math.sqrt(vdx*vdx + vdy*vdy);
-                        if (vdist >= npc.vigilanceRadius) return 'calm';
-                        const sprite = npc.currentSprite || '';
-                        const isPureUp = sprite.includes('walk_up') || (sprite.includes('poursuit_haut') && !sprite.includes('poursuit_diag_haut'));
-                        const isPureDown = sprite.includes('walk_down') || (sprite.includes('poursuit_bas') && !sprite.includes('poursuit_diag_bas'));
-                        let inFront;
-                        if (isPureUp) inFront = vdy < 0;
-                        else if (isPureDown) inFront = vdy > 0;
-                        else inFront = npc.facingLeft ? vdx < 0 : vdx > 0;
-                        return inFront ? 'alert' : 'calm';
-                    };
-                    if (angryTag !== 'local') npc.vigilanceLocal = computeAlert(player);
-                    if (angryTag !== 'remote' && remotePlayer.active) npc.vigilanceRemote = computeAlert(remotePlayer);
-                    // Backward compat
-                    npc.vigilance = npc.vigilanceLocal;
-                } else {
-                    npc.vigilance = 'angry';
-                }
+                npc.vigilance = 'angry';
             } else if (npc.state !== 'glisse' && npc.state !== 'tombe') {
                 if (npc.vigilanceRadius) {
-                    const computeAlert = (t) => {
-                        if (!t) return 'calm';
-                        const vdx = t.x - npc.x, vdy = t.y - npc.y;
-                        const vdist = Math.sqrt(vdx*vdx + vdy*vdy);
-                        if (vdist >= npc.vigilanceRadius) return 'calm';
-                        const sprite = npc.currentSprite || '';
-                        const isPureUp = sprite.includes('walk_up') || (sprite.includes('poursuit_haut') && !sprite.includes('poursuit_diag_haut'));
-                        const isPureDown = sprite.includes('walk_down') || (sprite.includes('poursuit_bas') && !sprite.includes('poursuit_diag_bas'));
-                        let inFront;
-                        if (isPureUp) inFront = vdy < 0;
-                        else if (isPureDown) inFront = vdy > 0;
-                        else inFront = npc.facingLeft ? vdx < 0 : vdx > 0;
-                        return inFront ? 'alert' : 'calm';
-                    };
-                    if (gameState.mode === 'multi') {
-                        npc.vigilanceLocal = computeAlert(player);
-                        npc.vigilanceRemote = remotePlayer.active ? computeAlert(remotePlayer) : 'calm';
-                        npc.vigilance = npc.vigilanceLocal;
-                    } else {
-                        npc.vigilance = computeAlert(player);
+                    // In multi, check both players and take the worst (most alert) result
+                    const targets = (gameState.mode === 'multi' && remotePlayer.active)
+                        ? [player, remotePlayer] : [player];
+                    let bestVig = 'calm';
+                    for (const t of targets) {
+                        const vdx = t.x - npc.x;
+                        const vdy = t.y - npc.y;
+                        const vdist = Math.sqrt(vdx * vdx + vdy * vdy);
+                        let inFront = false;
+                        if (vdist < npc.vigilanceRadius) {
+                            const sprite = npc.currentSprite || '';
+                            const isPureUp = sprite.includes('walk_up') ||
+                                (sprite.includes('poursuit_haut') && !sprite.includes('poursuit_diag_haut'));
+                            const isPureDown = sprite.includes('walk_down') ||
+                                (sprite.includes('poursuit_bas') && !sprite.includes('poursuit_diag_bas'));
+                            if (isPureUp) inFront = vdy < 0;
+                            else if (isPureDown) inFront = vdy > 0;
+                            else inFront = npc.facingLeft ? vdx < 0 : vdx > 0;
+                        }
+                        if (vdist < npc.vigilanceRadius && inFront) bestVig = 'alert';
                     }
+                    npc.vigilance = bestVig;
                 }
             }
         }
@@ -2262,34 +1963,22 @@ canvas {
             const dist = Math.sqrt(dx * dx + dy * dy);
             if (dist < 45) {
                 item.picked = true;
-                item.dropped = false;
+                item.dropped = false; // back in inventory, no longer a trap
                 if (!inventory.owned.includes(item.id)) inventory.owned.push(item.id);
-                inventory.item = item.id;
+                inventory.item = item.id; // newly picked becomes selected
                 inventory.showAnim = 0;
                 inventory.showAnimActive = true;
-                broadcastSound('loot');
-                // Multi: notify the other side. Joiner asks host to mark as picked;
-                // host broadcasts via world_state automatically.
-                if (gameState.mode === 'multi' && !net.isHost) {
-                    netSend({ type: 'request_pickup', itemId: item.id });
-                }
+                playSound('loot');
             }
         }
 
         // Health pickup: heals 1 HP up to 3 max, then disappears for 60s.
-        // In multi mode the host is authoritative: only the host runs the respawn timer
-        // and decides when the pickup is available again. The joiner just reacts to
-        // healthPickup.picked received via world_state.
-        const hostsThisPickup = (gameState.mode !== 'multi') || net.isHost;
-        if (healthPickup.pickupCooldown > 0) healthPickup.pickupCooldown--;
         if (healthPickup.picked) {
-            if (hostsThisPickup) {
-                healthPickup.respawnTimer--;
-                if (healthPickup.respawnTimer <= 0) {
-                    healthPickup.picked = false;
-                }
+            healthPickup.respawnTimer--;
+            if (healthPickup.respawnTimer <= 0) {
+                healthPickup.picked = false;
             }
-        } else if (healthPickup.pickupCooldown <= 0) {
+        } else {
             const hdx = player.x - healthPickup.x;
             const hdy = player.y - healthPickup.y;
             const hdist = Math.sqrt(hdx * hdx + hdy * hdy);
@@ -2297,11 +1986,7 @@ canvas {
                 player.health = Math.min(3, player.health + 1);
                 healthPickup.picked = true;
                 healthPickup.respawnTimer = healthPickup.respawnDuration;
-                healthPickup.pickupCooldown = 30; // half a second guard
-                broadcastSound('loot');
-                if (gameState.mode === 'multi' && !net.isHost) {
-                    netSend({ type: 'request_health_pickup' });
-                }
+                playSound('loot');
             }
         }
 
@@ -2367,21 +2052,13 @@ canvas {
                     entry.x = px; entry.y = py;
                     entry.picked = false;
                     entry.respawnTimer = 0;
-                    entry.dropped = true;
-                    entry.pickupCooldown = 60;
-                    // Multi sync
-                    if (gameState.mode === 'multi' && !net.isHost) {
-                        // Lock position locally for a moment to ignore stale host snapshots
-                        entry._localDropCooldown = 60;
-                        entry._netTargetX = px;
-                        entry._netTargetY = py;
-                        netSend({ type: 'request_drop', itemId: entry.id, x: px, y: py });
-                    }
+                    entry.dropped = true; // marks as a trap
+                    entry.pickupCooldown = 60; // 1s before Titeuf can pick it back
                 }
                 inventoryRemoveCurrent();
                 inventory.showAnim = 0;
                 inventory.showAnimActive = inventory.item !== null;
-                broadcastSound('drop');
+                playSound('drop');
             } else {
             // Determine throw direction based on player facing
             let throwDx = 0, throwDy = 0;
@@ -2435,44 +2112,22 @@ canvas {
                 size: heldSize,
                 sliding: true,
             });
-            // Multi: notify the peer so they see the projectile fly.
-            if (gameState.mode === 'multi' && net.conn && net.conn.open) {
-                netSend({
-                    type: 'item_throw',
-                    id: inventory.item,
-                    sprite: heldSprite,
-                    x: spawnX, y: spawnY,
-                    dx: throwDx * 9, dy: throwDy * 9,
-                    size: heldSize,
-                    life: 55,
-                });
-            }
             inventoryRemoveCurrent();
             inventory.showAnim = 0;
             inventory.showAnimActive = inventory.item !== null;
-            broadcastSound('drop');
+            playSound('drop');
 
             // Throwing in front of an alert (yellow) NPC instantly triggers pursuit:
             // she saw the projectile fly past her face.
-            // In multi: if we're not the host, send request_alert and let the host decide.
-            if (gameState.mode === 'multi' && !net.isHost) {
-                netSend({ type: 'request_alert', by: 'remote' });
-            } else {
-                for (const n of npcs) {
-                    if (!n.patrol) continue;
-                    // Use per-player vigilance in multi: she's "alert" toward THIS player only.
-                    const vForUs = (gameState.mode === 'multi')
-                        ? (n.vigilanceLocal || 'calm') // host's local view = the thrower
-                        : n.vigilance;
-                    if (vForUs !== 'alert') continue;
-                    if (n.state === 'glisse' || n.state === 'tombe' || n.state === 'gifle') continue;
-                    n.state = 'poursuit';
-                    n.vigilance = 'angry';
-                    n.angrySpeedTimer = 420;
-                    n.angryAt = 'local'; // the thrower is the host's local
-                    n.frame = 0; n.animTimer = 0;
-                    n.path = null; n.pathRecalcTimer = 0;
-                }
+            for (const n of npcs) {
+                if (!n.patrol) continue;
+                if (n.vigilance !== 'alert') continue;
+                if (n.state === 'glisse' || n.state === 'tombe' || n.state === 'gifle') continue;
+                n.state = 'poursuit';
+                n.vigilance = 'angry';
+                n.angrySpeedTimer = 420; // 7s of anger
+                n.frame = 0; n.animTimer = 0;
+                n.path = null; n.pathRecalcTimer = 0;
             }
             }
         }
@@ -2480,22 +2135,6 @@ canvas {
         // Update thrown items
         for (let i = thrownItems.length - 1; i >= 0; i--) {
             const t = thrownItems[i];
-
-            // Ghost projectiles (from peer): no collision, just animate and fade out.
-            if (t.ghost) {
-                if (t.sliding) {
-                    t.x += t.dx;
-                    t.y += t.dy;
-                    t.life--;
-                    t.dx *= 0.94;
-                    t.dy *= 0.94;
-                    if (t.life <= 0) {
-                        thrownItems.splice(i, 1);
-                    }
-                }
-                continue;
-            }
-
             if (t.sliding) {
                 // Step-by-step collision (check each pixel along path)
                 const speed = Math.sqrt(t.dx * t.dx + t.dy * t.dy);
@@ -2522,18 +2161,8 @@ canvas {
                             if (npc.state === 'tombe' || npc.state === 'gifle') continue;
                             const npcHb = { x: npc.x - 20, y: npc.y - 20, w: 40, h: 30 };
                             if (rectsOverlap(itemHb, npcHb)) {
-                                // In multi as joiner: ask the host to apply the hit; remove projectile locally
-                                if (gameState.mode === 'multi' && !net.isHost) {
-                                    netSend({
-                                        type: 'request_hit_npc',
-                                        itemId: t.id,
-                                        dx: t.dx, dy: t.dy,
-                                        thrownBy: 'remote', // from host's POV, the joiner is the remote
-                                    });
-                                    hitNpc = true;
-                                    break;
-                                }
                                 const wasSliding = npc.state === 'glisse';
+                                // Start (or refresh) glisse state
                                 npc.state = 'glisse';
                                 npc.slideKind = slideKindFor(t.dx, t.dy);
                                 const gInfo = glisseSpriteFor(npc, npc.slideKind);
@@ -2541,15 +2170,17 @@ canvas {
                                 npc.totalFrames = gInfo.frames;
                                 if (!wasSliding) { npc.frame = 0; npc.animTimer = 0; }
                                 npc.fps = 10;
+                                // Slide in throw direction
                                 const throwSpeed = Math.sqrt(t.dx * t.dx + t.dy * t.dy);
                                 const norm = throwSpeed > 0 ? throwSpeed : 1;
                                 npc.slideDx = (t.dx / norm) * 3;
                                 npc.slideDy = (t.dy / norm) * 3;
-                                npc.slideLife = 45;
+                                npc.slideLife = 45; // reset slide duration on every hit (combo extender)
+                                // Increment combo
                                 npc.comboCount = (npc.comboCount || 0) + 1;
-                                // Track who triggered: host's "local" = player.
-                                npc.angryAt = 'local';
+                                // Face direction of slide (keep current facing if purely vertical)
                                 if (t.dx !== 0) npc.facingLeft = t.dx < 0;
+                                // Mark item as picked + scheduled for respawn at spawn point
                                 const entry = worldItems.find(w => w.id === t.id);
                                 if (entry) {
                                     entry.picked = true;
@@ -2590,13 +2221,7 @@ canvas {
                         entry.x = t.x; entry.y = t.y;
                         entry.picked = false;
                         entry.respawnTimer = 0;
-                        entry.dropped = true;
-                        if (gameState.mode === 'multi' && !net.isHost) {
-                            entry._localDropCooldown = 60;
-                            entry._netTargetX = t.x;
-                            entry._netTargetY = t.y;
-                            netSend({ type: 'request_drop', itemId: entry.id, x: t.x, y: t.y });
-                        }
+                        entry.dropped = true; // thrown by Titeuf -> acts as a trap
                     } else {
                         worldItems.push({
                             id: t.id, sprite: t.sprite,
@@ -2618,13 +2243,7 @@ canvas {
                         entry.x = t.x; entry.y = t.y;
                         entry.picked = false;
                         entry.respawnTimer = 0;
-                        entry.dropped = true;
-                        if (gameState.mode === 'multi' && !net.isHost) {
-                            entry._localDropCooldown = 60;
-                            entry._netTargetX = t.x;
-                            entry._netTargetY = t.y;
-                            netSend({ type: 'request_drop', itemId: entry.id, x: t.x, y: t.y });
-                        }
+                        entry.dropped = true; // thrown by Titeuf -> acts as a trap
                     } else {
                         worldItems.push({
                             id: t.id, sprite: t.sprite,
@@ -2936,17 +2555,56 @@ canvas {
             if (npc.state === 'tombe' || npc.state === 'glisse') continue; // no dot when down
             const nRH = npc.cellH * npc.scale;
             const oY = npc.offsetY || 12;
-            const dotColor = npc.vigilance === 'angry' ? '#FF2020' : npc.vigilance === 'alert' ? '#FFD700' : '#1a3a8a';
+            const dotImg = npc.vigilance === 'angry' ? images.point_rouge
+                         : npc.vigilance === 'alert' ? images.point_jaune
+                         : images.point_bleu;
             const dotX = npc.x;
-            const dotY = npc.y - nRH + oY - 10;
+            const dotY = npc.y - nRH + oY - 20;
 
+            // Si CE PNJ poursuit MON joueur local : on affiche le point d'exclamation
+            // a la place du point de vigilance. Sinon : point de vigilance normal.
+            // En multi, l'autre joueur (non poursuivi) verra le point rouge classique
+            // car pour lui getChaseTarget(npc) !== son player local.
+            const isChasingMe = npc.state === 'poursuit' && getChaseTarget(npc) === player;
+            const renderImg = isChasingMe ? images.point_excla : dotImg;
+
+            if (renderImg && renderImg.complete && renderImg.naturalWidth) {
+                // Image native 32x16 -> rendu agrandi pour bonne visibilite
+                const dw = 56, dh = 28;
+                ctx.save();
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(renderImg, Math.round(dotX - dw / 2), Math.round(dotY - dh / 2), dw, dh);
+                ctx.restore();
+            }
+        }
+
+        // ========== CONFUSION STARS (PNJ a terre, etat 'tombe') ==========
+        // Animation 4 frames 32x32 jouee en boucle uniquement quand la maitresse
+        // est totalement a terre (derniere frame de l'anim de chute = frame 5).
+        // L'etat 'tombe' et 'frame' sont synchronises via world_state, donc tous
+        // les clients (solo / host / joiner) voient l'animation de facon coherente.
+        for (const npc of npcs) {
+            if (npc.state !== 'tombe') continue;
+            if (npc.frame < 5) continue; // attendre la derniere frame de chute
+            const starsImg = images.confusion_etoiles;
+            if (!starsImg || !starsImg.complete || !starsImg.naturalWidth) continue;
+            // Anim: 8 fps, 4 frames, en boucle (timing base sur Date.now pour rester
+            // independant de la frame courante du sprite NPC qui elle est gelee)
+            const frameIdx = Math.floor(Date.now() / 125) % 4;
+            const FRAME_W = 32, FRAME_H = 32;
+            const dw = 64, dh = 32; // rendu agrandi pour visibilite
+            const sx = frameIdx * FRAME_W;
+            const cx = npc.x;
+            // PNJ a terre : sa "tete couchee" est juste au-dessus de npc.y.
+            // On place les etoiles legerement au-dessus de cette tete.
+            const cy = npc.y - 24;
             ctx.save();
-            ctx.fillStyle = dotColor;
-            ctx.shadowColor = dotColor;
-            ctx.shadowBlur = 6;
-            ctx.beginPath();
-            ctx.arc(dotX, dotY, 3.5, 0, Math.PI * 2);
-            ctx.fill();
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(
+                starsImg,
+                sx, 0, FRAME_W, FRAME_H,
+                Math.round(cx - dw / 2), Math.round(cy - dh / 2), dw, dh
+            );
             ctx.restore();
         }
 
@@ -2963,12 +2621,13 @@ canvas {
         */
 
         // Score popup over Titeuf's head (in world space, inside camera transform)
-        function drawScorePopup(ent) {
-            if (!ent.scorePopup) return;
-            const total = 180;
-            const t = ent.scorePopup.timer / total;
-            const progress = 1 - t;
-            const yOffset = -72 - progress * 18;
+        if (player.scorePopup) {
+            const total = 180; // 3 seconds at 60fps
+            const t = player.scorePopup.timer / total; // 1 → 0
+            // Rises a bit while displayed (smooth ease-out)
+            const progress = 1 - t; // 0 → 1
+            const yOffset = -72 - progress * 18; // -72 → -90
+            // Fade out only at the very end
             const alpha = t < 0.25 ? t * 4 : 1;
             ctx.save();
             ctx.globalAlpha = alpha;
@@ -2978,14 +2637,12 @@ canvas {
             ctx.lineWidth = 3;
             ctx.strokeStyle = '#000';
             ctx.fillStyle = '#FFFFFF';
-            const px = ent.x;
-            const py = ent.y + yOffset;
-            ctx.strokeText(ent.scorePopup.text, px, py);
-            ctx.fillText(ent.scorePopup.text, px, py);
+            const px = player.x;
+            const py = player.y + yOffset;
+            ctx.strokeText(player.scorePopup.text, px, py);
+            ctx.fillText(player.scorePopup.text, px, py);
             ctx.restore();
         }
-        drawScorePopup(player);
-        if (remotePlayer.active) drawScorePopup(remotePlayer);
 
         ctx.restore();
 
@@ -2993,7 +2650,11 @@ canvas {
         for (const npc of npcs) {
             if (!npc.vigilanceRadius) continue;
             if (npc.state === 'tombe' || npc.state === 'glisse') continue;
-            const dotColor = npc.vigilance === 'angry' ? '#FF2020' : npc.vigilance === 'alert' ? '#FFD700' : '#1a3a8a';
+            const isChasingMe = npc.state === 'poursuit' && getChaseTarget(npc) === player;
+            const dotImg = isChasingMe ? images.point_excla
+                         : npc.vigilance === 'angry' ? images.point_rouge
+                         : npc.vigilance === 'alert' ? images.point_jaune
+                         : images.point_bleu;
 
             // Convert NPC world pos to screen pos
             const screenX = (npc.x - camX + viewW / 2) * zoom;
@@ -3009,21 +2670,14 @@ canvas {
                 const clampX = Math.max(margin, Math.min(cw - margin, screenX));
                 const clampY = Math.max(margin, Math.min(hudBottom, screenY));
 
-                ctx.save();
-                // Outer glow
-                ctx.fillStyle = dotColor;
-                ctx.shadowColor = dotColor;
-                ctx.shadowBlur = 15;
-                ctx.beginPath();
-                ctx.arc(clampX, clampY, 14, 0, Math.PI * 2);
-                ctx.fill();
-                // Inner dot
-                ctx.shadowBlur = 0;
-                ctx.fillStyle = '#fff';
-                ctx.beginPath();
-                ctx.arc(clampX, clampY, 5, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.restore();
+                if (dotImg && dotImg.complete && dotImg.naturalWidth) {
+                    // Indicateur off-screen agrandi pour rester bien visible au bord
+                    const dw = 128, dh = 64;
+                    ctx.save();
+                    ctx.imageSmoothingEnabled = false;
+                    ctx.drawImage(dotImg, Math.round(clampX - dw / 2), Math.round(clampY - dh / 2), dw, dh);
+                    ctx.restore();
+                }
             }
         }
 
@@ -3117,17 +2771,8 @@ canvas {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
         ctx.imageSmoothingEnabled = false;
-        // Adaptive zoom: ensure a minimum world viewport so the game stays playable
-        // on small screens. Targets at least 280x200 world units visible.
-        const MIN_VIEW_W = 280;
-        const MIN_VIEW_H = 200;
-        const targetZoom = 3.4;
-        const maxZoomW = canvas.width / MIN_VIEW_W;
-        const maxZoomH = canvas.height / MIN_VIEW_H;
-        CONFIG.CAMERA_ZOOM = Math.min(targetZoom, maxZoomW, maxZoomH);
     }
     window.addEventListener('resize', resize);
-    window.addEventListener('orientationchange', () => setTimeout(resize, 100));
 
     // ========== GAME LOOP ==========
     const FRAME_TIME = 1000 / 60;
