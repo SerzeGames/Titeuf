@@ -3093,8 +3093,8 @@ canvas {
         // In kitchen map: only render the player + the kitchen NPC (no items, pickups, etc.)
         const isKitchen = currentMap === 'cuisine';
 
-        // Remote player (multi only; never present in kitchen since kitchen is solo)
-        if (remotePlayer.active && !isKitchen) {
+        // Remote player (multi only) — visible on both maps
+        if (remotePlayer.active) {
             entities.push({
                 type: 'remote_player',
                 y: remotePlayer.y,
@@ -3450,13 +3450,8 @@ canvas {
             ctx.fillText(ent.scorePopup.text, px, py);
             ctx.restore();
         }
-        if (!isKitchen) {
-            drawScorePopup(player);
-            if (remotePlayer.active) drawScorePopup(remotePlayer);
-        } else {
-            // In kitchen, only local player has popups (no remote in kitchen)
-            drawScorePopup(player);
-        }
+        drawScorePopup(player);
+        if (remotePlayer.active) drawScorePopup(remotePlayer);
 
         ctx.restore();
 
