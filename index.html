@@ -2235,6 +2235,30 @@ canvas {
                 for (const c of getCurrentColliders()) { if (rectsOverlap(ghb, c)) { gBlocked = true; break; } }
                 if (!gBlocked) { npc.x = gx; npc.y = gy; }
                 else { npc.slideLife = 0; }
+
+                // ===== CHAIN COMBO ON DROPPED TRAPS =====
+                // While sliding, if the NPC slides over a freshly-dropped trap,
+                // extend the slide and bump the combo counter. This lets a panicked
+                // Titeuf chain multiple drops in front of the sliding NPC for big
+                // multipliers, mirroring the throw-chain combo.
+                const npcHb = { x: npc.x - 18, y: npc.y - 12, w: 36, h: 24 };
+                for (const item of worldItems) {
+                    if (item.picked) continue;
+                    if (!item.dropped) continue;
+                    const itemHb = { x: item.x - item.size/2, y: item.y - item.size/2, w: item.size, h: item.size };
+                    if (!rectsOverlap(npcHb, itemHb)) continue;
+                    // Reset slide life so the NPC keeps going further
+                    npc.slideLife = 45;
+                    npc.comboCount = (npc.comboCount || 0) + 1;
+                    // Update authorship: the latest trap-placer becomes the new culprit.
+                    npc.angryAt = item.droppedBy || npc.angryAt || 'local';
+                    applyAngryVigilance(npc);
+                    // Item disappears, schedule respawn
+                    item.picked = true;
+                    item.respawnTimer = -1;
+                    break; // one trap per frame
+                }
+
                 if (npc.slideLife <= 0) {
                     npc.state = 'tombe';
                     npc.currentSprite = tombeSpriteFor(npc, npc.slideKind || 'h');
