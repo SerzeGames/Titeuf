@@ -669,6 +669,8 @@ canvas {
                 entry.picked = false;
                 entry.dropped = true;
                 entry.respawnTimer = 0;
+                // Track that the joiner is responsible for this trap.
+                entry.droppedBy = 'remote';
             }
         } else if (msg.type === 'request_alert') {
             // Joiner threw an item; check if maitresse is alert toward them.
@@ -2193,6 +2195,8 @@ canvas {
                 npc._patrolStuck = 0;
                 // Reset chase sprite smoothing so next chase starts clean
                 npc._chaseDx = 0; npc._chaseDy = 0; npc._chaseCat = undefined;
+                // Clear angryAt so a future provocation isn't blamed on the previous culprit.
+                npc.angryAt = null;
             }
 
             if (npc.state === 'glisse') {
@@ -2623,6 +2627,9 @@ canvas {
                 if (slipDx !== 0) npc.facingLeft = slipDx < 0;
                 // A dropped trap is a deliberate Titeuf action: it counts as a combo hit.
                 npc.comboCount = (npc.comboCount || 0) + 1;
+                // Blame the player who placed this trap (not whoever is closest).
+                // Default to 'local' if untagged (e.g. solo mode).
+                npc.angryAt = item.droppedBy || 'local';
                 // Item disappears, schedule respawn
                 item.picked = true;
                 item.respawnTimer = -1; // -1 = wait for NPC recovery
@@ -2653,6 +2660,7 @@ canvas {
                     item.y = item.spawnY;
                     item.picked = false;
                     item.dropped = false;
+                    item.droppedBy = null;
                 }
             }
         }
@@ -2677,6 +2685,7 @@ canvas {
             if (dist < 45) {
                 item.picked = true;
                 item.dropped = false;
+                item.droppedBy = null;
                 if (!inventory.owned.includes(item.id)) inventory.owned.push(item.id);
                 inventory.item = item.id;
                 inventory.showAnim = 0;
@@ -2851,6 +2860,14 @@ canvas {
                 life: 55,
                 size: heldSize,
                 sliding: true,
+                // In multi: who threw this. Used to set npc.angryAt correctly if the
+                // item hits the NPC in flight OR lands on the floor and traps the NPC.
+                // 'local' = me (this client). When the host throws, it's 'local'.
+                // When the joiner throws, the host receives a ghost projectile (via
+                // item_throw) — the host doesn't run collisions on ghosts, but if the
+                // joiner's projectile drops to the floor on the joiner side, the
+                // joiner sends request_drop which the host applies with 'remote'.
+                thrownBy: 'local',
             });
             // Multi: notify the peer so they see the projectile fly.
             if (gameState.mode === 'multi' && net.conn && net.conn.open) {
@@ -2963,8 +2980,9 @@ canvas {
                                 npc.slideDy = (t.dy / norm) * 3;
                                 npc.slideLife = 45;
                                 npc.comboCount = (npc.comboCount || 0) + 1;
-                                // Track who triggered: host's "local" = player.
-                                npc.angryAt = 'local';
+                                // Blame the actual thrower (in case projectile traveled off-screen
+                                // and the wrong player would otherwise be assumed).
+                                npc.angryAt = t.thrownBy || 'local';
                                 if (t.dx !== 0) npc.facingLeft = t.dx < 0;
                                 const entry = worldItems.find(w => w.id === t.id);
                                 if (entry) {
@@ -3007,6 +3025,9 @@ canvas {
                         entry.picked = false;
                         entry.respawnTimer = 0;
                         entry.dropped = true;
+                        // Track who dropped/threw it — used to blame the right player
+                        // when the NPC trips on this trap later.
+                        entry.droppedBy = t.thrownBy || 'local';
                         if (gameState.mode === 'multi' && !net.isHost) {
                             entry._localDropCooldown = 60;
                             entry._netTargetX = t.x;
@@ -3018,6 +3039,7 @@ canvas {
                             id: t.id, sprite: t.sprite,
                             x: t.x, y: t.y, size: t.size, picked: false,
                             spawnX: t.x, spawnY: t.y, respawnTimer: 0, dropped: true,
+                            droppedBy: t.thrownBy || 'local',
                         });
                     }
                     thrownItems.splice(i, 1);
@@ -3035,6 +3057,7 @@ canvas {
                         entry.picked = false;
                         entry.respawnTimer = 0;
                         entry.dropped = true;
+                        entry.droppedBy = t.thrownBy || 'local';
                         if (gameState.mode === 'multi' && !net.isHost) {
                             entry._localDropCooldown = 60;
                             entry._netTargetX = t.x;
@@ -3046,6 +3069,7 @@ canvas {
                             id: t.id, sprite: t.sprite,
                             x: t.x, y: t.y, size: t.size, picked: false,
                             spawnX: t.x, spawnY: t.y, respawnTimer: 0, dropped: true,
+                            droppedBy: t.thrownBy || 'local',
                         });
                     }
                     thrownItems.splice(i, 1);
@@ -3405,7 +3429,7 @@ canvas {
             const sx = frameIdx * FRAME_W;
             const cx = npc.x;
             // PNJ a terre : sa "tete couchee" est juste au-dessus de npc.y.
-            const cy = npc.y - 60;
+            const cy = npc.y - 24;
             ctx.save();
             ctx.imageSmoothingEnabled = false;
             ctx.drawImage(
