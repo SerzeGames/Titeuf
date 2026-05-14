@@ -174,6 +174,33 @@ canvas {
         { x: 480, y: 340, w: 165, h: 70 },
     ];
 
+    // Colliders for the kitchen map. Same world size (768x512) as the classroom.
+    const COLLIDERS_CUISINE = [
+        // Outer walls (purple frame)
+        { x: 0, y: 0, w: CONFIG.MAP_W, h: 120 },                  // entire top wall (under ceiling)
+        { x: 0, y: 0, w: 18, h: CONFIG.MAP_H },                   // left wall
+        { x: CONFIG.MAP_W - 18, y: 0, w: 18, h: CONFIG.MAP_H },   // right wall
+        { x: 0, y: CONFIG.MAP_H - 18, w: CONFIG.MAP_W, h: 18 },   // bottom wall
+
+        // Furniture / counters that extend further down into the floor:
+        // Left cabinets (yellow tall cabinet)
+        { x: 130, y: 110, w: 110, h: 55 },
+        // Central sink + cabinets block
+        { x: 265, y: 110, w: 175, h: 55 },
+        // Right cabinets block
+        { x: 535, y: 110, w: 185, h: 55 },
+
+        // Round table + chair on the right
+        { x: 585, y: 210, w: 145, h: 105 },
+    ];
+
+    // Active map ('classe' for gameplay, 'cuisine' for post-victory exploration).
+    // The collision/render code below reads `currentColliders` and `currentMapImg`.
+    let currentMap = 'classe';
+    function getCurrentColliders() {
+        return currentMap === 'cuisine' ? COLLIDERS_CUISINE : COLLIDERS;
+    }
+
     // ========== NAVIGATION GRID & A* PATHFINDING ==========
     // The grid marks cells as walkable or blocked. We inflate colliders by an NPC
     // hitbox margin so the path keeps a safe distance from corners.
@@ -181,24 +208,30 @@ canvas {
     const NAV_INFLATE = 18;       // expand obstacles by this much (~half NPC hitbox)
     const NAV_COLS = Math.ceil(CONFIG.MAP_W / NAV_CELL);
     const NAV_ROWS = Math.ceil(CONFIG.MAP_H / NAV_CELL);
-    const navGrid = new Uint8Array(NAV_COLS * NAV_ROWS); // 0=walkable, 1=blocked
+    const navGrid_classe = new Uint8Array(NAV_COLS * NAV_ROWS); // 0=walkable, 1=blocked
+    const navGrid_cuisine = new Uint8Array(NAV_COLS * NAV_ROWS);
+    // Pointer to the active grid (reassigned when map changes)
+    let navGrid = navGrid_classe;
 
-    (function buildNavGrid() {
+    function buildNavGridFor(grid, colliders) {
         for (let r = 0; r < NAV_ROWS; r++) {
             for (let c = 0; c < NAV_COLS; c++) {
                 const cx = c * NAV_CELL + NAV_CELL / 2;
                 const cy = r * NAV_CELL + NAV_CELL / 2;
                 let blocked = false;
-                for (const col of COLLIDERS) {
+                for (const col of colliders) {
                     if (cx > col.x - NAV_INFLATE && cx < col.x + col.w + NAV_INFLATE &&
                         cy > col.y - NAV_INFLATE && cy < col.y + col.h + NAV_INFLATE) {
                         blocked = true; break;
                     }
                 }
-                navGrid[r * NAV_COLS + c] = blocked ? 1 : 0;
+                grid[r * NAV_COLS + c] = blocked ? 1 : 0;
             }
         }
-    })();
+    }
+    // Build both grids once (colliders never change at runtime)
+    buildNavGridFor(navGrid_classe, COLLIDERS);
+    buildNavGridFor(navGrid_cuisine, COLLIDERS_CUISINE);
 
     function navIsWalkable(c, r) {
         if (c < 0 || c >= NAV_COLS || r < 0 || r >= NAV_ROWS) return false;
@@ -332,7 +365,7 @@ canvas {
                 const t = s / steps;
                 const x = ax + dx * t, y = ay + dy * t;
                 const hb = { x: x - hitbox.w/2, y: y + hitbox.offsetY - hitbox.h/2, w: hitbox.w, h: hitbox.h };
-                for (const c of COLLIDERS) {
+                for (const c of getCurrentColliders()) {
                     if (rectsOverlap(hb, c)) return false;
                 }
             }
@@ -406,11 +439,13 @@ canvas {
         currentAnim: 'idle',
         panique: false,
         scorePopup: null,
+        score: 0,
+        health: 3,
     };
     const camera = { x: 350, y: 280 };
 
     // ========== GAME STATE MACHINE ==========
-    // 'menu' -> 'defi' -> 'game'. Multi adds 'lobby' between menu and defi.
+    // 'menu' -> 'defi' -> 'game' -> 'victoire'. Multi adds 'lobby' between menu and defi.
     const gameState = {
         screen: 'menu',
         menuSelection: 0,
@@ -418,6 +453,9 @@ canvas {
         mode: 'solo',           // 'solo' or 'multi'
         defiReadyCount: 0,      // multi: number of players who pressed A on defi (host-tracked)
         defiSelfReady: false,   // local: has this player pressed A on defi?
+        // Victoire screen state
+        victoireAnim: 0,        // 0->1 slide-down progress
+        victoirePlayers: [],    // [{nickname, score, isLocal}] sorted by score desc, set on entry
     };
 
     // ========== MULTIPLAYER (PeerJS) ==========
@@ -571,6 +609,8 @@ canvas {
             remotePlayer.frame = msg.frame|0;
             remotePlayer.currentAnim = msg.anim || 'idle';
             remotePlayer.panique = !!msg.panique;
+            if (typeof msg.score === 'number') remotePlayer.score = msg.score;
+            if (typeof msg.health === 'number') remotePlayer.health = msg.health;
             // Remote player's viewport (used for symmetric detection in multi)
             if (msg.halfW) remotePlayer.halfW = msg.halfW;
             if (msg.halfH) remotePlayer.halfH = msg.halfH;
@@ -681,6 +721,26 @@ canvas {
             if (typeof msg.pts === 'number') {
                 remotePlayer.scorePopup = { text: '+' + msg.pts, timer: 180 };
             }
+        } else if (msg.type === 'victoire') {
+            // The other player walked through the door. Sync our screen to victoire.
+            // Use the score they just sent (most up-to-date for them).
+            if (typeof msg.score === 'number') remotePlayer.score = msg.score;
+            if (msg.nickname) net.peerNickname = msg.nickname;
+            triggerVictory(false);
+        } else if (msg.type === 'goto_cuisine') {
+            // The other player pressed A on the victoire screen — follow them
+            // into the kitchen so we stay together for the post-victory exploration.
+            if (gameState.screen === 'victoire' || gameState.screen === 'game') {
+                startCuisine(false); // don't broadcast again, we received the request
+            }
+        } else if (msg.type === 'goto_menu_from_cuisine') {
+            // Other player went back to menu — we follow.
+            currentMap = 'classe';
+            setActiveNpcForMap('classe');
+            remotePlayer.active = false;
+            gameState.screen = 'menu';
+            restartMusicFromStart();
+            cleanupNet();
         }
     }
 
@@ -701,6 +761,8 @@ canvas {
             frame: player.frame,
             anim: player.currentAnim,
             panique: player.panique,
+            score: player.score,
+            health: player.health,
             // Local viewport so host can apply detection using THIS player's screen size
             halfW: canvas.width / (2 * CONFIG.CAMERA_ZOOM),
             halfH: canvas.height / (2 * CONFIG.CAMERA_ZOOM),
@@ -922,12 +984,53 @@ canvas {
     });
 
     // ========== ITEMS ==========
+    // Items spawn at different positions depending on the active map.
+    // The worldItems array is the *active* list (mutated when changing map).
+    // Both items follow the player into the kitchen so he/she can still pick them up there.
+    const ITEM_SPAWNS_CLASSE = {
+        voiture: { x: 720, y: 270 },
+        bille:   { x: 50,  y: 480 },
+    };
+    const ITEM_SPAWNS_CUISINE = {
+        voiture: { x: 60,  y: 470 },  // bas à gauche
+        bille:   { x: 140, y: 470 },  // a coté
+    };
+    // Health pickup spawn positions per map (top-left in classroom, top-right in kitchen)
+    const HEALTH_SPAWN_CLASSE = { x: 40,  y: 165 };
+    const HEALTH_SPAWN_CUISINE = { x: 700, y: 195 };
     const worldItems = [
         { id: 'voiture', sprite: 'item_voiture', x: 720, y: 270, size: 38, picked: false,
           spawnX: 720, spawnY: 270, respawnTimer: 0 },
         { id: 'bille', sprite: 'item_bille', x: 50, y: 480, size: 38, picked: false,
           spawnX: 50, spawnY: 480, respawnTimer: 0 },
     ];
+
+    // Helper: respawn all items at their position for the given map.
+    function respawnItemsForMap(mapName) {
+        const spawns = mapName === 'cuisine' ? ITEM_SPAWNS_CUISINE : ITEM_SPAWNS_CLASSE;
+        for (const item of worldItems) {
+            const s = spawns[item.id];
+            if (!s) continue;
+            item.spawnX = s.x;
+            item.spawnY = s.y;
+            item.x = s.x;
+            item.y = s.y;
+            item.picked = false;
+            item.dropped = false;
+            item.respawnTimer = 0;
+            item.pickupCooldown = 0;
+            item._localPickCooldown = 0;
+            item._localDropCooldown = 0;
+        }
+        // Also reposition the health pickup
+        const h = mapName === 'cuisine' ? HEALTH_SPAWN_CUISINE : HEALTH_SPAWN_CLASSE;
+        healthPickup.x = h.x;
+        healthPickup.y = h.y;
+        healthPickup.picked = false;
+        healthPickup.respawnTimer = 0;
+        healthPickup.pickupCooldown = 0;
+        healthPickup._localPickCooldown = 0;
+    }
     // Health pickup: separate from worldItems because it isn't held/thrown.
     // Sprite 64x16: actual content is 2 frames of 16x16 side-by-side (rest is empty).
     const healthPickup = {
@@ -966,8 +1069,13 @@ canvas {
     const thrownItems = [];
 
     // ========== NPCs ==========
-    const npcs = [
-        {
+    // The active NPC list contains the NPCs of the *current* map.
+    // - On the classroom map: contains the maitresse.
+    // - On the kitchen map: contains francois.
+    // We swap the list when changing maps so all existing code (which references
+    // npcs[0] or iterates over npcs) keeps working without per-NPC map filtering,
+    // and the network sync (which assumes one active NPC) still works.
+    const NPC_MAITRESSE = {
             name: 'maitresse',
             x: 385, y: 170,
             spawnX: 385, spawnY: 170,
@@ -1006,19 +1114,83 @@ canvas {
                 { x: 300, y: 170 }, { x: 385, y: 170, wait: 180 },
             ],
             patrolIndex: 0, waitTimer: 180,
-            state: 'idle', // idle, walking, glisse, tombe, poursuit, gifle
+            state: 'idle',
             vigilance: 'calm', vigilanceRadius: 140,
-            // Reaction state
             slideDx: 0, slideDy: 0, slideLife: 0,
             tombeTimer: 0, angrySpeedTimer: 0,
-            // Combo: count of items that hit during the current slide
             comboCount: 0,
-            // Pathfinding state
             path: null, pathIndex: 0, pathRecalcTimer: 0, pathTargetX: 0, pathTargetY: 0,
-            // Anti-stuck tracking
             stuckTimer: 0, lastProgressX: 0, lastProgressY: 0, commitDir: null, commitTimer: 0,
-        },
-    ];
+    };
+
+    // Francois: kitchen NPC. Same logic as maitresse, with francois_* sprites.
+    // Idle sprite is 4 frames (256x64) instead of 8 like maitresse.
+    const NPC_FRANCOIS = {
+            name: 'francois',
+            x: 200, y: 300,
+            spawnX: 200, spawnY: 300,
+            sprites: {
+                idle: 'francois_idle',
+                walk_h: 'francois_walk_h',
+                walk_down: 'francois_walk_down',
+                walk_up: 'francois_walk_up',
+                glisse: 'francois_glisse',
+                glisse_haut: 'francois_glisse_haut',
+                glisse_bas: 'francois_glisse_bas',
+                glisse_diag_haut: 'francois_glisse_diag_haut',
+                glisse_diag_bas: 'francois_glisse_diag_bas',
+                tombe: 'francois_tombe',
+                tombe_haut: 'francois_tombe_haut',
+                tombe_bas: 'francois_tombe_bas',
+                tombe_diag_haut: 'francois_tombe_diag_haut',
+                tombe_diag_bas: 'francois_tombe_diag_bas',
+                poursuit: 'francois_poursuit',
+                poursuit_bas: 'francois_poursuit_bas',
+                poursuit_haut: 'francois_poursuit_haut',
+                poursuit_diag_haut: 'francois_poursuit_diag_haut',
+                poursuit_diag_bas: 'francois_poursuit_diag_bas',
+                gifle: 'francois_gifle',
+            },
+            currentSprite: 'francois_idle',
+            // Francois idle: 4 frames (256x64); walk: 6 frames (256x128); others: 4 frames
+            cols: 4, idleFrames: 4, walkFrames: 6, totalFrames: 4,
+            // The "tombe" sprite is only 4 frames (256x64) vs maitresse's 8 (6 filled + 2 empty)
+            tombeFrames: 4,
+            cellW: 64, cellH: 64, scale: 1.8, fps: 8,
+            frame: 0, animTimer: 0, facingLeft: false, offsetY: 20,
+            // Francois sprite has less empty space above the head than maitresse,
+            // so the vigilance dot needs to sit lower.
+            vigilanceDotOffset: 10,
+            // Francois is faster than the maitresse: he walks faster on patrol (and
+            // his walk animation plays faster too), and chases just slightly faster
+            // — always above the maitresse but very escapable.
+            // Maitresse patrol = 1.2  / chase = 1.2 * 3.7 = 4.44
+            // Francois  patrol = 1.7  / chase = 1.7 * 2.75 = 4.68 (~5% faster than maitresse)
+            speed: 1.7, baseSpeed: 1.7,
+            chaseSpeedMultiplier: 2.75,
+            hitbox: { w: 30, h: 14, offsetY: 12 },
+            // Patrol around the kitchen (avoiding walls, counters and table)
+            // Kitchen colliders: top wall y<120, side walls 0-18 / 750-768,
+            // counters y=110-165 in three blocks, table at x=585-730 y=210-315.
+            patrol: [
+                { x: 200, y: 300, wait: 180 },
+                { x: 500, y: 300 },
+                { x: 500, y: 450 },
+                { x: 200, y: 450 },
+                { x: 200, y: 300, wait: 180 },
+            ],
+            patrolIndex: 0, waitTimer: 180,
+            state: 'idle',
+            vigilance: 'calm', vigilanceRadius: 140,
+            slideDx: 0, slideDy: 0, slideLife: 0,
+            tombeTimer: 0, angrySpeedTimer: 0,
+            comboCount: 0,
+            path: null, pathIndex: 0, pathRecalcTimer: 0, pathTargetX: 0, pathTargetY: 0,
+            stuckTimer: 0, lastProgressX: 0, lastProgressY: 0, commitDir: null, commitTimer: 0,
+    };
+
+    // Active NPC list (mutable so we can swap on map change).
+    const npcs = [NPC_MAITRESSE];
 
     let images = {};
     const sounds = {};
@@ -1095,6 +1267,29 @@ canvas {
                 point_rouge: 'images/pointrouge.png',
                 point_excla: 'images/pointexcla.png',
                 confusion_etoiles: 'images/etoiles_confusion.png',
+                victoire_bg: 'images/victoire.png',
+                map_cuisine: 'images/cuisine.png',
+                // Francois sprites (kitchen NPC)
+                francois_idle: 'images/francois_idle.png',
+                francois_walk_h: 'images/francois_marche_hori.png',
+                francois_walk_down: 'images/francois_marche_bas.png',
+                francois_walk_up: 'images/francois_marche_haut.png',
+                francois_glisse: 'images/francois_glisse_hori.png',
+                francois_glisse_haut: 'images/francois_glisse_haut.png',
+                francois_glisse_bas: 'images/francois_glisse_bas.png',
+                francois_glisse_diag_haut: 'images/francois_glisse_diag_haut.png',
+                francois_glisse_diag_bas: 'images/francois_glisse_diag_bas.png',
+                francois_tombe: 'images/francois_tombe_hori.png',
+                francois_tombe_haut: 'images/francois_tombe_haut.png',
+                francois_tombe_bas: 'images/francois_tombe_bas.png',
+                francois_tombe_diag_haut: 'images/francois_tombe_diag_haut.png',
+                francois_tombe_diag_bas: 'images/francois_tombe_diag_bas.png',
+                francois_poursuit: 'images/francois_poursuit_hori.png',
+                francois_poursuit_bas: 'images/francois_poursuit_bas.png',
+                francois_poursuit_haut: 'images/francois_poursuit_haut.png',
+                francois_poursuit_diag_haut: 'images/francois_poursuit_diag_haut.png',
+                francois_poursuit_diag_bas: 'images/francois_poursuit_diag_bas.png',
+                francois_gifle: 'images/francois_gifle.png',
             };
             const total = Object.keys(sources).length;
             let count = 0;
@@ -1129,6 +1324,8 @@ canvas {
             glisse: 'son/glisse.mp3',
             tombe: 'son/tombe.mp3',
             music_classe: 'son/classe.mp3',
+            music_cuisine: 'son/cuisine.mp3',
+            victoire: 'son/victoire.mp3',
         };
         for (const [key, src] of Object.entries(sources)) {
             const a = new Audio();
@@ -1139,6 +1336,8 @@ canvas {
         // Music: loop forever, lower volume
         sounds.music_classe.loop = true;
         sounds.music_classe.volume = 0.4;
+        sounds.music_cuisine.loop = true;
+        sounds.music_cuisine.volume = 0.4;
         // Glisse sound loops while NPC is sliding; stopped manually on transition.
         sounds.glisse.loop = true;
     }
@@ -1147,7 +1346,7 @@ canvas {
     let musicStarted = false;
     function startMusic() {
         if (musicStarted) return;
-        const m = sounds.music_classe;
+        const m = (currentMap === 'cuisine') ? sounds.music_cuisine : sounds.music_classe;
         if (!m) return;
         m.play().then(() => { musicStarted = true; }).catch(() => {});
     }
@@ -1334,7 +1533,8 @@ canvas {
     }
     function canMove(nx, ny) {
         const hb = playerHitbox(nx, ny);
-        for (const c of COLLIDERS) {
+        const colliders = getCurrentColliders();
+        for (const c of colliders) {
             if (rectsOverlap(hb, c)) return false;
         }
         return true;
@@ -1408,9 +1608,165 @@ canvas {
         const dR = Math.hypot(remotePlayer.x - npc.x, remotePlayer.y - npc.y);
         npc.chaseTarget = dR < dL ? 'remote' : 'local';
     }
+
+    // ========== VICTOIRE / FIN DE PARTIE ==========
+    // Triggered when a player walks into the exit door with score >= 8.
+    // In multi, syncs both clients to the 'victoire' screen with both scores.
+    function triggerVictory(triggeredByLocal) {
+        if (gameState.screen === 'victoire') return; // already won, ignore
+        // Build the player list for display
+        const players = [];
+        const myName = (net.nickname || 'Toi').slice(0, 14);
+        players.push({ nickname: myName, score: player.score, isLocal: true });
+        if (gameState.mode === 'multi' && remotePlayer.active) {
+            const otherName = (net.peerNickname || 'Joueur 2').slice(0, 14);
+            players.push({ nickname: otherName, score: remotePlayer.score || 0, isLocal: false });
+        }
+        // Sort by score desc (highest first)
+        players.sort((a, b) => b.score - a.score);
+        gameState.victoirePlayers = players;
+        gameState.victoireAnim = 0;
+        gameState.screen = 'victoire';
+        // Stop music, play victory jingle
+        try {
+            if (sounds.music_classe) {
+                sounds.music_classe.pause();
+                sounds.music_classe.currentTime = 0;
+            }
+            if (sounds.music_cuisine) {
+                sounds.music_cuisine.pause();
+                sounds.music_cuisine.currentTime = 0;
+            }
+            stopGlisseSound();
+        } catch (_) {}
+        playSound('victoire');
+        // Notify the other player so both screens are in sync
+        if (triggeredByLocal && gameState.mode === 'multi' && net.conn && net.conn.open) {
+            netSend({
+                type: 'victoire',
+                score: player.score,
+                nickname: myName,
+            });
+        }
+    }
+
+    // Switch the active NPC according to current map. Call BEFORE setting currentMap.
+    function setActiveNpcForMap(mapName) {
+        // Swap the nav grid so pathfinding uses the right colliders
+        navGrid = (mapName === 'cuisine') ? navGrid_cuisine : navGrid_classe;
+        // Respawn items at their map-specific positions
+        respawnItemsForMap(mapName);
+        // Clear any thrown items left over from the previous map
+        thrownItems.length = 0;
+        // Clear inventory (Titeuf drops what he was carrying when switching maps)
+        inventory.item = null;
+        inventory.owned = [];
+        inventory.showAnimActive = false;
+        // Replace the contents of npcs in place (keeps the same array reference,
+        // which other code may hold onto).
+        npcs.length = 0;
+        if (mapName === 'cuisine') {
+            // Reset Francois to spawn position when entering kitchen
+            NPC_FRANCOIS.x = NPC_FRANCOIS.spawnX;
+            NPC_FRANCOIS.y = NPC_FRANCOIS.spawnY;
+            NPC_FRANCOIS.state = 'idle';
+            NPC_FRANCOIS.vigilance = 'calm';
+            NPC_FRANCOIS.patrolIndex = 0;
+            NPC_FRANCOIS.waitTimer = 180;
+            NPC_FRANCOIS.frame = 0; NPC_FRANCOIS.animTimer = 0;
+            NPC_FRANCOIS.slideLife = 0; NPC_FRANCOIS.tombeTimer = 0;
+            NPC_FRANCOIS.angrySpeedTimer = 0; NPC_FRANCOIS.comboCount = 0;
+            NPC_FRANCOIS.path = null; NPC_FRANCOIS.pathIndex = 0;
+            NPC_FRANCOIS.pathRecalcTimer = 0;
+            NPC_FRANCOIS.currentSprite = 'francois_idle';
+            NPC_FRANCOIS.totalFrames = NPC_FRANCOIS.idleFrames;
+            npcs.push(NPC_FRANCOIS);
+        } else {
+            npcs.push(NPC_MAITRESSE);
+        }
+    }
+
+    // ========== KITCHEN MAP (second map, post-victory exploration) ==========
+    // broadcast=true means: notify the other player to follow us into the kitchen.
+    // broadcast=false: we are following the other player (received a goto_cuisine).
+    function startCuisine(broadcast) {
+        if (broadcast === undefined) broadcast = true;
+        currentMap = 'cuisine';
+        setActiveNpcForMap('cuisine');
+        // Spawn positions: host on the left, joiner on the right (multi);
+        // solo just spawns in the middle.
+        if (gameState.mode === 'multi') {
+            if (net.isHost) {
+                player.x = 280; player.y = 380;
+            } else {
+                player.x = 480; player.y = 380;
+            }
+        } else {
+            player.x = 380; player.y = 380;
+        }
+        player.health = 3;
+        player.score = 0;
+        player.panique = false;
+        player.gifleActive = false;
+        player.headBlink = 0;
+        player.scorePopup = null;
+        player.frame = 0; player.animTimer = 0;
+        player.currentAnim = 'idle';
+        player.facingLeft = false;
+        // Keep remotePlayer active in multi so we keep seeing each other
+        if (gameState.mode !== 'multi') {
+            remotePlayer.active = false;
+        }
+        // Snap camera
+        camera.x = player.x; camera.y = player.y;
+        gameState.screen = 'game';
+        // Restart background music (will pick cuisine.mp3 now that currentMap='cuisine')
+        restartMusicFromStart();
+        // Tell the other player to follow us, if we triggered the move
+        if (broadcast && gameState.mode === 'multi' && net.conn && net.conn.open) {
+            netSend({ type: 'goto_cuisine' });
+        }
+    }
+
     function update(dt) {
         const input = getInput();
         const raw = getRawInput();
+
+        // In kitchen map: ESC / B returns to menu (escape hatch from solo exploration)
+        if (currentMap === 'cuisine') {
+            const bPressed = (keys['Escape'] && !keys['_prevEsc']) || (gamepad.b && !gamepad.bPrev);
+            keys['_prevEsc'] = keys['Escape'];
+            if (bPressed) {
+                // In multi: tell the other player we're leaving, then disconnect cleanly
+                if (gameState.mode === 'multi' && net.conn && net.conn.open) {
+                    try { netSend({ type: 'goto_menu_from_cuisine' }); } catch (_) {}
+                    cleanupNet();
+                }
+                currentMap = 'classe';
+                setActiveNpcForMap('classe');
+                remotePlayer.active = false;
+                gameState.screen = 'menu';
+                restartMusicFromStart();
+                return;
+            }
+        }
+
+        // ===== EXIT DOOR: detect when player reaches the door with score >= 8 =====
+        // The door is the top-left wardrobe collider { x:36, y:55, w:78, h:40 }.
+        // Player.y is the feet/center position; player can't enter the collider,
+        // so we detect when they're standing just in front of (below) the door.
+        // Zone: a generous box covering the door footprint + a strip below it.
+        if (gameState.screen === 'game' && currentMap === 'classe' && player.score >= 8) {
+            const doorMinX = 20;   // a bit wider than the door (36) for tolerance
+            const doorMaxX = 130;  // door right edge ~114
+            const doorMinY = 55;   // top of door
+            const doorMaxY = 160;  // strip below door so feet position registers
+            if (player.x > doorMinX && player.x < doorMaxX &&
+                player.y > doorMinY && player.y < doorMaxY) {
+                triggerVictory(true);
+                return; // skip rest of update this frame
+            }
+        }
 
         // Smooth interpolation of the remote player toward its latest network target.
         // Lerp factor 0.25 = quick catch-up while staying smooth.
@@ -1566,7 +1922,9 @@ canvas {
                     npc.animTimer = 0;
                     const maxF = npc.totalFrames || 1;
                     if (npc.state === 'tombe') {
-                        if (npc.frame < 5) npc.frame = Math.min(5, npc.frame + 1);
+                        // Stop on last filled tombe frame (varies by NPC).
+                        const tombeFrames = npc.tombeFrames || 6;
+                        if (npc.frame < tombeFrames - 1) npc.frame++;
                     } else if (npc.state === 'gifle' || npc.state === 'idle') {
                         if (npc.frame < maxF - 1) npc.frame++;
                     } else {
@@ -1698,7 +2056,7 @@ canvas {
 
                 function npcCanMove(x, y) {
                     const hb = { x: x - npc.hitbox.w/2, y: y + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
-                    for (const c of COLLIDERS) { if (rectsOverlap(hb, c)) return false; }
+                    for (const c of getCurrentColliders()) { if (rectsOverlap(hb, c)) return false; }
                     return true;
                 }
 
@@ -1833,6 +2191,8 @@ canvas {
                 // Force fresh A* computation for the new patrol leg
                 npc.path = null; npc.pathRecalcTimer = 0;
                 npc._patrolStuck = 0;
+                // Reset chase sprite smoothing so next chase starts clean
+                npc._chaseDx = 0; npc._chaseDy = 0; npc._chaseCat = undefined;
             }
 
             if (npc.state === 'glisse') {
@@ -1845,7 +2205,7 @@ canvas {
                 const gy = npc.y + npc.slideDy;
                 const ghb = { x: gx - npc.hitbox.w/2, y: gy + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
                 let gBlocked = false;
-                for (const c of COLLIDERS) { if (rectsOverlap(ghb, c)) { gBlocked = true; break; } }
+                for (const c of getCurrentColliders()) { if (rectsOverlap(ghb, c)) { gBlocked = true; break; } }
                 if (!gBlocked) { npc.x = gx; npc.y = gy; }
                 else { npc.slideLife = 0; }
                 if (npc.slideLife <= 0) {
@@ -1888,10 +2248,12 @@ canvas {
                 }
             } else if (npc.state === 'tombe') {
                 npc.currentSprite = tombeSpriteFor(npc, npc.slideKind || 'h');
-                npc.totalFrames = 6;
+                // Tombe sprite frame count depends on NPC (maitresse: 6+2empty=8, francois: 4).
+                // We freeze on the LAST filled frame so the NPC stays visibly down.
+                const tombeFrames = npc.tombeFrames || 6;
+                npc.totalFrames = tombeFrames;
                 npc.fps = 8;
-                // Freeze on last filled frame (sprite sheets have 6 filled frames + 2 empty)
-                if (npc.frame >= 5) npc.frame = 5;
+                if (npc.frame >= tombeFrames - 1) npc.frame = tombeFrames - 1;
                 npc.tombeTimer--;
                 if (npc.tombeTimer <= 0) {
                     npc.angrySpeedTimer = 420;
@@ -1919,7 +2281,8 @@ canvas {
                 // Move toward target with obstacle avoidance, then derive sprite from
                 // the ACTUAL movement (so when going around an obstacle, the horizontal
                 // poursuit sprite plays during the longe-phase).
-                const pSpeed = npc.baseSpeed * 3.7;
+                const chaseMul = npc.chaseSpeedMultiplier || 3.7;
+                const pSpeed = npc.baseSpeed * chaseMul;
                 const beforeX = npc.x, beforeY = npc.y;
                 moveNpcToward(npc, target.x, target.y, pSpeed);
                 const realDx = npc.x - beforeX;
@@ -1930,17 +2293,41 @@ canvas {
                     // No movement: keep current sprite, facing based on target direction
                     npc.facingLeft = pdx < 0;
                 } else {
-                    const absRdx = Math.abs(realDx);
-                    const absRdy = Math.abs(realDy);
+                    // Smooth the actual movement vector over time to avoid sprite
+                    // flicker when pathfinding makes small lateral adjustments frame
+                    // by frame. EMA with alpha=0.15 = ~6-frame effective window.
+                    npc._chaseDx = (npc._chaseDx || 0) * 0.85 + realDx * 0.15;
+                    npc._chaseDy = (npc._chaseDy || 0) * 0.85 + realDy * 0.15;
+                    const sDx = npc._chaseDx;
+                    const sDy = npc._chaseDy;
+                    const absRdx = Math.abs(sDx);
+                    const absRdy = Math.abs(sDy);
                     const ratio = absRdx === 0 ? Infinity : absRdy / absRdx;
-                    if (ratio > 2.5) {
-                        npc.currentSprite = realDy > 0 ? npc.sprites.poursuit_bas : npc.sprites.poursuit_haut;
-                    } else if (ratio > 0.4) {
-                        npc.currentSprite = realDy > 0 ? npc.sprites.poursuit_diag_bas : npc.sprites.poursuit_diag_haut;
+
+                    // Hysteresis: keep the previous sprite category until we leave a
+                    // "safe band" around the threshold. Cat 0 = horizontal, 1 = diag,
+                    // 2 = vertical.
+                    const prevCat = npc._chaseCat;
+                    let cat;
+                    if (prevCat === undefined) {
+                        // First time: simple thresholds
+                        cat = ratio > 2.5 ? 2 : ratio > 0.4 ? 1 : 0;
+                    } else {
+                        // Sticky thresholds: need a bigger change to switch category
+                        if (prevCat === 0) cat = ratio > 0.55 ? 1 : 0;
+                        else if (prevCat === 1) cat = ratio > 2.8 ? 2 : (ratio < 0.30 ? 0 : 1);
+                        else /* prevCat === 2 */ cat = ratio < 2.2 ? 1 : 2;
+                    }
+                    npc._chaseCat = cat;
+
+                    if (cat === 2) {
+                        npc.currentSprite = sDy > 0 ? npc.sprites.poursuit_bas : npc.sprites.poursuit_haut;
+                    } else if (cat === 1) {
+                        npc.currentSprite = sDy > 0 ? npc.sprites.poursuit_diag_bas : npc.sprites.poursuit_diag_haut;
                     } else {
                         npc.currentSprite = npc.sprites.poursuit;
                     }
-                    npc.facingLeft = realDx < 0;
+                    npc.facingLeft = sDx < 0;
                 }
 
                 // Caught target? Rectangle-based check
@@ -2048,7 +2435,7 @@ canvas {
                     const ny = npc.y + ndy * npc.speed;
                     const hb = { x: nx - npc.hitbox.w/2, y: ny + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
                     let blocked = false;
-                    for (const c of COLLIDERS) { if (rectsOverlap(hb, c)) { blocked = true; break; } }
+                    for (const c of getCurrentColliders()) { if (rectsOverlap(hb, c)) { blocked = true; break; } }
 
                     let movedDx = 0, movedDy = 0;
                     if (!blocked) {
@@ -2061,8 +2448,8 @@ canvas {
                         const hbX = { x: nx - npc.hitbox.w/2, y: npc.y + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
                         const hbY = { x: npc.x - npc.hitbox.w/2, y: ny + npc.hitbox.offsetY - npc.hitbox.h/2, w: npc.hitbox.w, h: npc.hitbox.h };
                         let xOk = true, yOk = true;
-                        for (const c of COLLIDERS) { if (rectsOverlap(hbX, c)) { xOk = false; break; } }
-                        for (const c of COLLIDERS) { if (rectsOverlap(hbY, c)) { yOk = false; break; } }
+                        for (const c of getCurrentColliders()) { if (rectsOverlap(hbX, c)) { xOk = false; break; } }
+                        for (const c of getCurrentColliders()) { if (rectsOverlap(hbY, c)) { yOk = false; break; } }
                         if (xOk) { npc.x = nx; movedDx = ndx * npc.speed; }
                         else if (yOk) { npc.y = ny; movedDy = ndy * npc.speed; }
                     }
@@ -2119,8 +2506,10 @@ canvas {
             if (npc.animTimer >= 1) {
                 npc.animTimer = 0;
                 if (npc.state === 'tombe') {
-                    if (npc.frame < 5) {
-                        npc.frame = (npc.frame + 1) % npc.totalFrames;
+                    // Stop on last filled tombe frame (varies by NPC).
+                    const tombeFrames = npc.tombeFrames || 6;
+                    if (npc.frame < tombeFrames - 1) {
+                        npc.frame++;
                     }
                 } else if (npc.state === 'gifle' || npc.state === 'idle') {
                     // Play once, stop on last frame
@@ -2383,7 +2772,7 @@ canvas {
                 let py = player.y + dropDy * 25;
                 const hb = { x: px - 12, y: py - 6, w: 24, h: 12 };
                 let blocked = false;
-                for (const c of COLLIDERS) {
+                for (const c of getCurrentColliders()) {
                     if (rectsOverlap(hb, c)) { blocked = true; break; }
                 }
                 if (blocked) { px = player.x; py = player.y; }
@@ -2438,7 +2827,7 @@ canvas {
             // Make sure spawn point is not inside a collider
             const spawnHb = { x: spawnX - 12, y: spawnY - 6, w: 24, h: 12 };
             let spawnBlocked = false;
-            for (const c of COLLIDERS) {
+            for (const c of getCurrentColliders()) {
                 if (rectsOverlap(spawnHb, c)) { spawnBlocked = true; break; }
             }
             if (spawnBlocked) {
@@ -2539,13 +2928,12 @@ canvas {
                     // Full item hitbox (covers entire visual area)
                     const itemHb = { x: nx - 15, y: ny - 30, w: 30, h: 35 };
                     let blocked = false;
-                    for (const c of COLLIDERS) {
+                    for (const c of getCurrentColliders()) {
                         if (rectsOverlap(itemHb, c)) { blocked = true; break; }
                     }
-                    // Check NPC collision (maitresse)
+                    // Check NPC collision (any NPC currently active on this map)
                     if (!blocked) {
                         for (const npc of npcs) {
-                            if (npc.name !== 'maitresse') continue;
                             // Allow hits while sliding (to extend combo) but not while falling/slapping
                             if (npc.state === 'tombe' || npc.state === 'gifle') continue;
                             const npcHb = { x: npc.x - 20, y: npc.y - 20, w: 40, h: 30 };
@@ -2688,7 +3076,8 @@ canvas {
         ctx.translate(-camX + viewW / 2, -camY + viewH / 2);
 
         // Map
-        ctx.drawImage(images.map, 0, 0, CONFIG.MAP_W, CONFIG.MAP_H);
+        const mapImg = currentMap === 'cuisine' ? images.map_cuisine : images.map;
+        ctx.drawImage(mapImg, 0, 0, CONFIG.MAP_W, CONFIG.MAP_H);
 
         // ========== RENDER ALL ENTITIES (Y-sorted) ==========
         // Build list of all entities to render
@@ -2701,8 +3090,11 @@ canvas {
             x: player.x,
         });
 
-        // Remote player (multi only)
-        if (remotePlayer.active) {
+        // In kitchen map: only render the player + the kitchen NPC (no items, pickups, etc.)
+        const isKitchen = currentMap === 'cuisine';
+
+        // Remote player (multi only; never present in kitchen since kitchen is solo)
+        if (remotePlayer.active && !isKitchen) {
             entities.push({
                 type: 'remote_player',
                 y: remotePlayer.y,
@@ -2710,7 +3102,7 @@ canvas {
             });
         }
 
-        // NPC entities
+        // NPC entities (maitresse in classroom, francois in kitchen)
         for (const npc of npcs) {
             entities.push({
                 type: 'npc',
@@ -2720,7 +3112,7 @@ canvas {
             });
         }
 
-        // World items (not picked up)
+        // World items (not picked up) — visible on both maps
         for (const item of worldItems) {
             if (item.picked) continue;
             entities.push({
@@ -2731,7 +3123,7 @@ canvas {
             });
         }
 
-        // Health pickup (animated, 2 frames)
+        // Health pickup (animated, 2 frames) — both maps
         if (!healthPickup.picked) {
             entities.push({
                 type: 'health_pickup',
@@ -2740,14 +3132,17 @@ canvas {
             });
         }
 
-        // Exit arrow over the top-left door
+        if (!isKitchen) {
+
+        // Exit arrow over the top-left door — classroom only
         entities.push({
             type: 'exit_arrow',
             y: exitArrow.y,
             x: exitArrow.x,
         });
+        } // end if (!isKitchen)
 
-        // Thrown items
+        // Thrown items — both maps (Titeuf can throw items in the kitchen too)
         for (const t of thrownItems) {
             entities.push({
                 type: 'thrown_item',
@@ -2968,7 +3363,10 @@ canvas {
                          : npc.vigilance === 'alert' ? images.point_jaune
                          : images.point_bleu;
             const dotX = npc.x;
-            const dotY = npc.y - nRH + oY - 20;
+            // Each NPC can override the default offset (-20) via vigilanceDotOffset.
+            // Useful when the sprite has more/less empty space above the head.
+            const dotOffset = npc.vigilanceDotOffset !== undefined ? npc.vigilanceDotOffset : -20;
+            const dotY = npc.y - nRH + oY + dotOffset;
 
             // Si CE PNJ poursuit MON joueur local : on affiche le point d'exclamation
             // a la place du point de vigilance. Sinon : point de vigilance normal.
@@ -2994,7 +3392,9 @@ canvas {
         // les clients (solo / host / joiner) voient l'animation de facon coherente.
         for (const npc of npcs) {
             if (npc.state !== 'tombe') continue;
-            if (npc.frame < 5) continue; // attendre la derniere frame de chute
+            // Wait until the fall animation reached its last frame.
+            const tombeFrames = npc.tombeFrames || 6;
+            if (npc.frame < tombeFrames - 1) continue;
             const starsImg = images.confusion_etoiles;
             if (!starsImg || !starsImg.complete || !starsImg.naturalWidth) continue;
             // Anim: 8 fps, 4 frames, en boucle (timing base sur Date.now pour rester
@@ -3021,7 +3421,7 @@ canvas {
         ctx.save();
         ctx.strokeStyle = 'rgba(255,0,0,0.5)';
         ctx.lineWidth = 1;
-        for (const c of COLLIDERS) ctx.strokeRect(c.x, c.y, c.w, c.h);
+        for (const c of getCurrentColliders()) ctx.strokeRect(c.x, c.y, c.w, c.h);
         const hb = playerHitbox(player.x, player.y);
         ctx.strokeStyle = 'rgba(0,255,0,0.8)';
         ctx.strokeRect(hb.x, hb.y, hb.w, hb.h);
@@ -3050,8 +3450,13 @@ canvas {
             ctx.fillText(ent.scorePopup.text, px, py);
             ctx.restore();
         }
-        drawScorePopup(player);
-        if (remotePlayer.active) drawScorePopup(remotePlayer);
+        if (!isKitchen) {
+            drawScorePopup(player);
+            if (remotePlayer.active) drawScorePopup(remotePlayer);
+        } else {
+            // In kitchen, only local player has popups (no remote in kitchen)
+            drawScorePopup(player);
+        }
 
         ctx.restore();
 
@@ -3490,20 +3895,155 @@ canvas {
         }
     }
 
+    // ========== VICTOIRE SCREEN ==========
+    function updateVictoire(dt) {
+        if (gameState.victoireAnim < 1) {
+            gameState.victoireAnim = Math.min(1, gameState.victoireAnim + 1 / 30);
+        }
+        // Press A after animation completes -> go to kitchen map (together in multi).
+        // Press B -> back to menu (also notifies the peer in multi).
+        const inp = pollScreenInput();
+        if (inp.aPressed && gameState.victoireAnim >= 1) {
+            startCuisine(true);
+        } else if (inp.bPressed && gameState.victoireAnim >= 1) {
+            // Tell peer to go back to menu too before tearing down the connection
+            if (gameState.mode === 'multi' && net.conn && net.conn.open) {
+                try { netSend({ type: 'goto_menu_from_cuisine' }); } catch (_) {}
+                cleanupNet();
+            }
+            currentMap = 'classe';
+            setActiveNpcForMap('classe');
+            remotePlayer.active = false;
+            gameState.screen = 'menu';
+            restartMusicFromStart();
+        }
+    }
+
+    function renderVictoire() {
+        const cw = canvas.width, ch = canvas.height;
+        ctx.fillStyle = '#f4c41e';
+        ctx.fillRect(0, 0, cw, ch);
+        const bg = images.victoire_bg;
+        if (bg && bg.complete) {
+            // Slide down animation (same easing as defi)
+            const ease = 1 - Math.pow(1 - gameState.victoireAnim, 3);
+            const ratio = Math.max(cw / bg.width, ch / bg.height);
+            const dw = bg.width * ratio;
+            const dh = bg.height * ratio;
+            const finalY = (ch - dh) / 2;
+            const startY = -dh;
+            const dy = startY + (finalY - startY) * ease;
+            const bgX = (cw - dw) / 2;
+            ctx.drawImage(bg, bgX, dy, dw, dh);
+
+            // Once the slide animation is finished AND we're in multi mode,
+            // overlay the player score table in the empty middle area.
+            if (gameState.victoireAnim >= 1 && gameState.mode === 'multi'
+                && gameState.victoirePlayers && gameState.victoirePlayers.length > 0) {
+                renderVictoireTable(cw, ch);
+            }
+        }
+
+        // Bottom instruction (after animation done)
+        if (gameState.victoireAnim >= 1) {
+            ctx.font = 'bold ' + Math.floor(ch * 0.03) + 'px "Comic Sans MS", cursive';
+            ctx.fillStyle = '#5a2a8c';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('A pour continuer  \u2014  B pour menu', cw / 2, ch * 0.95);
+        }
+    }
+
+    // Score table for multi victory screen: avatar | nickname | score / 8 [coupe]
+    function renderVictoireTable(cw, ch) {
+        const players = gameState.victoirePlayers;
+        const tableW = Math.min(cw * 0.55, 620);
+        const rowH = Math.max(70, ch * 0.10);
+        const rowGap = 10;
+        const totalH = players.length * rowH + (players.length - 1) * rowGap;
+        const tableX = (cw - tableW) / 2;
+        // Center vertically in the empty space (roughly middle-lower of screen)
+        const tableY = ch * 0.50 - totalH / 2;
+
+        for (let i = 0; i < players.length; i++) {
+            const p = players[i];
+            const ry = tableY + i * (rowH + rowGap);
+            // Row background
+            ctx.fillStyle = i === 0 ? '#fff4b8' : '#f0d878';
+            ctx.strokeStyle = '#5a2a8c';
+            ctx.lineWidth = 4;
+            roundRect(ctx, tableX, ry, tableW, rowH, 12);
+            ctx.fill();
+            ctx.stroke();
+
+            // Avatar (Titeuf head)
+            const avSize = rowH * 0.80;
+            const avX = tableX + 12;
+            const avY = ry + (rowH - avSize) / 2;
+            if (images.hud_tete) {
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(images.hud_tete, avX, avY, avSize, avSize);
+            }
+
+            // Nickname
+            ctx.font = 'bold ' + Math.floor(rowH * 0.36) + 'px "Comic Sans MS", cursive';
+            ctx.fillStyle = '#5a2a8c';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            const nickX = avX + avSize + 16;
+            ctx.fillText(p.nickname, nickX, ry + rowH / 2);
+
+            // Score "X / 8" + coupe icon (right-aligned)
+            const coupeSize = rowH * 0.55;
+            const rightPad = 16;
+            const coupeX = tableX + tableW - rightPad - coupeSize;
+            const coupeY = ry + (rowH - coupeSize) / 2;
+            if (images.hud_coupe) {
+                ctx.drawImage(images.hud_coupe, coupeX, coupeY, coupeSize, coupeSize);
+            }
+            ctx.font = 'bold ' + Math.floor(rowH * 0.38) + 'px "Comic Sans MS", cursive';
+            ctx.fillStyle = '#5a2a8c';
+            ctx.textAlign = 'right';
+            ctx.fillText(p.score + ' / 8', coupeX - 8, ry + rowH / 2);
+
+            // "1er" / "2e" rank badge in front of the row
+            if (i === 0 && players.length > 1) {
+                ctx.font = 'bold ' + Math.floor(rowH * 0.30) + 'px "Comic Sans MS", cursive';
+                ctx.fillStyle = '#c00';
+                ctx.textAlign = 'right';
+                ctx.fillText('1er', avX + avSize - 4, ry + rowH * 0.18);
+            }
+        }
+    }
+
     // Restart music from beginning (used when entering defi screen)
     function restartMusicFromStart() {
-        const m = sounds.music_classe;
-        if (!m) return;
-        try {
-            m.currentTime = 0;
-            m.play().catch(() => {});
-        } catch (_) {}
+        // Play the music appropriate for the current map; stop the other map's music.
+        const classeMusic = sounds.music_classe;
+        const cuisineMusic = sounds.music_cuisine;
+        const isKitchen = currentMap === 'cuisine';
+        const active = isKitchen ? cuisineMusic : classeMusic;
+        const inactive = isKitchen ? classeMusic : cuisineMusic;
+        // Stop the other one
+        if (inactive) {
+            try { inactive.pause(); inactive.currentTime = 0; } catch (_) {}
+        }
+        // Play the active one from start
+        if (active) {
+            try {
+                active.currentTime = 0;
+                active.play().catch(() => {});
+            } catch (_) {}
+        }
         musicStarted = true;
     }
 
     // Reset the game world and transition to playing.
     // In multi mode, players spawn at different positions based on host/joiner role.
     function startGame() {
+        // Make sure we're on the classroom map (in case we just came from kitchen)
+        currentMap = 'classe';
+        setActiveNpcForMap('classe');
         if (gameState.mode === 'multi') {
             if (net.isHost) {
                 player.x = 350; player.y = 280;
@@ -3525,6 +4065,10 @@ canvas {
         player.gifleActive = false;
         player.headBlink = 0;
         player.scorePopup = null;
+        remotePlayer.score = 0;
+        remotePlayer.health = 3;
+        gameState.victoireAnim = 0;
+        gameState.victoirePlayers = [];
         inventory.item = null;
         inventory.owned = [];
         inventory.showAnimActive = false;
@@ -3564,12 +4108,14 @@ canvas {
             if (gameState.screen === 'menu') updateMenu(FRAME_TIME);
             else if (gameState.screen === 'lobby') updateLobby(FRAME_TIME);
             else if (gameState.screen === 'defi') updateDefi(FRAME_TIME);
+            else if (gameState.screen === 'victoire') updateVictoire(FRAME_TIME);
             else update(FRAME_TIME);
             accumulator -= FRAME_TIME;
         }
         if (gameState.screen === 'menu') renderMenu();
         else if (gameState.screen === 'lobby') renderLobby();
         else if (gameState.screen === 'defi') renderDefi();
+        else if (gameState.screen === 'victoire') renderVictoire();
         else render();
         requestAnimationFrame(gameLoop);
     }
