@@ -642,6 +642,7 @@ canvas {
             npc.comboCount = (npc.comboCount || 0) + 1;
             // Track that the JOINER hit her -> she'll be angry at 'remote' on host side
             npc.angryAt = 'remote';
+            applyAngryVigilance(npc);
             if (msg.dx !== 0) npc.facingLeft = msg.dx < 0;
             const entry = worldItems.find(w => w.id === msg.itemId);
             if (entry) {
@@ -682,9 +683,9 @@ canvas {
                 // Use vigilanceRemote for the joiner's POV
                 if ((n.vigilanceRemote || 'calm') !== 'alert') continue;
                 n.state = 'poursuit';
-                n.vigilance = 'angry';
                 n.angrySpeedTimer = 420;
                 n.angryAt = msg.by || 'remote';
+                applyAngryVigilance(n);
                 n.frame = 0; n.animTimer = 0;
                 n.path = null; n.pathRecalcTimer = 0;
             }
@@ -1613,6 +1614,20 @@ canvas {
         npc.chaseTarget = dR < dL ? 'remote' : 'local';
     }
 
+    // Lock vigilance to "angry-by-tag" the instant a NPC is provoked.
+    // The culprit must immediately see RED; the other player must see BLUE
+    // (no transient yellow alert from facing direction during the chase phase).
+    function applyAngryVigilance(npc) {
+        const tag = npc.angryAt || 'local';
+        if (gameState.mode === 'multi') {
+            npc.vigilanceLocal = (tag === 'local') ? 'angry' : 'calm';
+            npc.vigilanceRemote = (tag === 'remote') ? 'angry' : 'calm';
+            npc.vigilance = npc.vigilanceLocal; // host POV
+        } else {
+            npc.vigilance = 'angry';
+        }
+    }
+
     // ========== VICTOIRE / FIN DE PARTIE ==========
     // Triggered when a player walks into the exit door with score >= 8.
     // In multi, syncs both clients to the 'victoire' screen with both scores.
@@ -2530,29 +2545,17 @@ canvas {
             // Vigilance: per-player in multi, single value in solo.
             // angryAt is set when someone hits her and persists during angry timer.
             if (npc.angrySpeedTimer > 0) {
-                // Only the player who made her angry sees red; the other sees calm/alert based on his own visibility
+                // The NPC is exclusively focused on the player who provoked her.
+                // The other player is "invisible" to her during this phase — even if
+                // he's right next to her, she ignores him because she's hunting the
+                // culprit. So innocent player stays CALM (blue) regardless of the
+                // NPC's facing direction or proximity.
                 const angryTag = npc.angryAt || 'local';
                 if (gameState.mode === 'multi') {
+                    // Culprit sees red, the other sees blue. No yellow alert phase
+                    // for the innocent while she's hunting someone else.
                     npc.vigilanceLocal = (angryTag === 'local') ? 'angry' : 'calm';
                     npc.vigilanceRemote = (angryTag === 'remote') ? 'angry' : 'calm';
-                    // For the angry target, even calm vigilance doesn't apply (she's red).
-                    // For the other player, compute alert/calm normally based on visibility.
-                    const computeAlert = (t) => {
-                        if (!t) return 'calm';
-                        const vdx = t.x - npc.x, vdy = t.y - npc.y;
-                        const vdist = Math.sqrt(vdx*vdx + vdy*vdy);
-                        if (vdist >= npc.vigilanceRadius) return 'calm';
-                        const sprite = npc.currentSprite || '';
-                        const isPureUp = sprite.includes('walk_up') || (sprite.includes('poursuit_haut') && !sprite.includes('poursuit_diag_haut'));
-                        const isPureDown = sprite.includes('walk_down') || (sprite.includes('poursuit_bas') && !sprite.includes('poursuit_diag_bas'));
-                        let inFront;
-                        if (isPureUp) inFront = vdy < 0;
-                        else if (isPureDown) inFront = vdy > 0;
-                        else inFront = npc.facingLeft ? vdx < 0 : vdx > 0;
-                        return inFront ? 'alert' : 'calm';
-                    };
-                    if (angryTag !== 'local') npc.vigilanceLocal = computeAlert(player);
-                    if (angryTag !== 'remote' && remotePlayer.active) npc.vigilanceRemote = computeAlert(remotePlayer);
                     // Backward compat
                     npc.vigilance = npc.vigilanceLocal;
                 } else {
@@ -2632,6 +2635,7 @@ canvas {
                 // Blame the player who placed this trap (not whoever is closest).
                 // Default to 'local' if untagged (e.g. solo mode).
                 npc.angryAt = item.droppedBy || 'local';
+                applyAngryVigilance(npc);
                 // Item disappears, schedule respawn
                 item.picked = true;
                 item.respawnTimer = -1; // -1 = wait for NPC recovery
@@ -2907,9 +2911,9 @@ canvas {
                     if (vForUs !== 'alert') continue;
                     if (n.state === 'glisse' || n.state === 'tombe' || n.state === 'gifle') continue;
                     n.state = 'poursuit';
-                    n.vigilance = 'angry';
                     n.angrySpeedTimer = 420;
                     n.angryAt = 'local'; // the thrower is the host's local
+                    applyAngryVigilance(n);
                     n.frame = 0; n.animTimer = 0;
                     n.path = null; n.pathRecalcTimer = 0;
                 }
@@ -2989,6 +2993,7 @@ canvas {
                                 // Blame the actual thrower (in case projectile traveled off-screen
                                 // and the wrong player would otherwise be assumed).
                                 npc.angryAt = t.thrownBy || 'local';
+                                applyAngryVigilance(npc);
                                 if (t.dx !== 0) npc.facingLeft = t.dx < 0;
                                 const entry = worldItems.find(w => w.id === t.id);
                                 if (entry) {
