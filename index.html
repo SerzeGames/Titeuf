@@ -2278,6 +2278,7 @@ canvas {
                 } else if (npc.angryAt === 'local') {
                     culprit = player;
                 } else {
+                    // No specific culprit: pick the closest player.
                     if (!remotePlayer.active) culprit = player;
                     else {
                         const dL = Math.hypot(player.x - npc.x, player.y - npc.y);
@@ -2289,7 +2290,6 @@ canvas {
                 // Invincibility: when the culprit is in the post-hit blink window (3s),
                 // an angry NPC treats him as "not on screen" so the chase doesn't trigger
                 // (and any ongoing chase falls back to patrol via the stillVisible check).
-                // Only applies while the NPC is in chase/angry mode (vigilance red).
                 if (npc.angrySpeedTimer > 0 && (culprit.headBlink || 0) > 0) return false;
                 // Each player has their own viewport. For the local player we use canvas;
                 // for the remote we use the halfW/halfH they broadcast (falls back to local).
@@ -2454,6 +2454,10 @@ canvas {
                 npc._patrolStuck = 0;
                 // Reset chase sprite smoothing so next chase starts clean
                 npc._chaseDx = 0; npc._chaseDy = 0; npc._chaseCat = undefined;
+                // Reset chase target so the next chase picks a fresh one
+                // (via angryAt or fallback). Without this, the NPC would forever
+                // remember its previous target even after the chase ended.
+                npc.chaseTarget = null;
                 // NOTE: do NOT reset npc.angryAt here. The NPC may still be hunting
                 // the culprit during the angry phase (patrouille accelerée). We only
                 // clear angryAt when the angrySpeedTimer expires (handled elsewhere),
@@ -2557,8 +2561,13 @@ canvas {
                     npc.fps = npc.chaseFps || 6;
                 }
             } else if (npc.state === 'poursuit') {
-                // Multi: refresh chase target sticky logic
-                updateChaseTarget(npc);
+                // While actively chasing, the target is sticky: we don't switch to
+                // the other player just because they happened to get closer or because
+                // the original target became invincible. Only updateChaseTarget if no
+                // current target is set. Otherwise reuse the existing chaseTarget tag.
+                if (!npc.chaseTarget) {
+                    updateChaseTarget(npc);
+                }
                 const target = getChaseTarget(npc);
 
                 // If the target is invincible (post-hit blink window), stop chasing
@@ -2662,6 +2671,11 @@ canvas {
                         netSend({ type: 'world_event', event: 'gifle_remote' });
                         playSound('gifle');
                     }
+                    // IMPORTANT: skip the rest of the chase block. The state just
+                    // transitioned to 'gifle'; we must not re-evaluate stillVisible
+                    // (which would see the target's just-applied headBlink and call
+                    // resumePatrol — overwriting our 'gifle' state).
+                    continue;
                 }
 
                 // Target off screen (from THEIR own viewport): switch to angry patrol.
@@ -3678,7 +3692,10 @@ canvas {
                 }
                 ctx.drawImage(
                     npcImg,
-                    nSrcX, nSrcY, npc.cellW, npc.cellH,
+                    // Crop 1px off the bottom of the source rect so the next frame's
+                    // top edge doesn't bleed into this one when scaling.
+                    // (Renders fine because the bottom pixel of each frame is empty.)
+                    nSrcX, nSrcY, npc.cellW, npc.cellH - 1,
                     -nRW / 2, -nRH + oY,
                     nRW, nRH
                 );
