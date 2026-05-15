@@ -1740,6 +1740,27 @@ canvas {
         } else {
             npc.vigilance = 'angry';
         }
+        // A fresh provocation re-enables chasing: the NPC was previously frustrated
+        // (giveUpChase = true), but this new offense gives him a fresh start.
+        npc._giveUpChase = false;
+    }
+
+    // Returns true if the NPC is allowed to (re)start a chase. The _giveUpChase flag
+    // is set when a target became invincible mid-chase. We auto-clear it the moment
+    // every player has recovered (headBlink === 0) — so François resumes the chase
+    // as soon as Titeuf's head icon stops blinking, provided François is still angry
+    // red and sees Titeuf (both checked by the caller via culpritOnScreen).
+    function canStartChase(npc) {
+        if (npc._giveUpChase) {
+            const aBlink = player.headBlink || 0;
+            const bBlink = remotePlayer.active ? (remotePlayer.headBlink || 0) : 0;
+            if (aBlink === 0 && bBlink === 0) {
+                npc._giveUpChase = false;
+                return true;
+            }
+            return false;
+        }
+        return true;
     }
 
     // ========== VICTOIRE / FIN DE PARTIE ==========
@@ -1929,15 +1950,22 @@ canvas {
 
         // Detect panique: any NPC currently chasing THIS player triggers panic mode.
         // In multi, the maitresse only panics the player she's actually chasing.
+        // EXCEPTION: while the player is invincible (post-hit blink window), the NPC
+        // is supposed to have lost sight of them — so no panic, even if there's a
+        // transient frame of stale state from the host. This also covers the case
+        // where the player vomits mid-chase: they shouldn't oscillate between panic
+        // and normal while invincible.
         let chased = false;
-        for (const n of npcs) {
-            if (n.state !== 'poursuit') continue;
-            if (gameState.mode === 'multi') {
-                // Only panic if I'm the target
-                const target = getChaseTarget(n);
-                if (target === player) { chased = true; break; }
-            } else {
-                chased = true; break;
+        if (player.headBlink === 0 && !player.vomitActive) {
+            for (const n of npcs) {
+                if (n.state !== 'poursuit') continue;
+                if (gameState.mode === 'multi') {
+                    // Only panic if I'm the target
+                    const target = getChaseTarget(n);
+                    if (target === player) { chased = true; break; }
+                } else {
+                    chased = true; break;
+                }
             }
         }
         player.panique = chased;
@@ -2232,6 +2260,8 @@ canvas {
                     // fresh blame, and so the chase target falls back to "closest"
                     // until someone provokes again.
                     npc.angryAt = null;
+                    npc._invincibleTag = null;
+                    npc._giveUpChase = false;
                     // Find nearest patrol waypoint to resume patrol
                     if (npc.state === 'walking' || npc.state === 'poursuit') {
                         let nearestIdx = 0;
@@ -2573,10 +2603,20 @@ canvas {
                 // If the target is invincible (post-hit blink window), stop chasing
                 // RIGHT NOW — before moving, before any facing/sprite updates. The NPC
                 // falls back to angry patrol; he stays red (angrySpeedTimer keeps ticking)
-                // but no longer hunts the invincible target. This prevents the "spinning
-                // on the spot + repeated slap attempts" oscillation that happens when
-                // the NPC is on top of an invincible target.
+                // but no longer hunts the invincible target.
+                //
+                // We also remember WHICH tag was invincible (in _invincibleTag) so that
+                // the NPC keeps ignoring this target even if some other code tries to
+                // re-establish the chase mid-frame. This is reset when the target's
+                // headBlink reaches 0 again (handled in the walking state below).
                 if ((target.headBlink || 0) > 0) {
+                    // Titeuf became invincible mid-chase. François gives up the chase
+                    // FOR THE REST OF THIS ANGRY CYCLE — he stays red and patrols
+                    // accelérée until his angrySpeedTimer expires, but he won't
+                    // re-engage even after Titeuf becomes visible again. The flag is
+                    // cleared when angrySpeedTimer hits 0 OR after a successful slap.
+                    npc._giveUpChase = true;
+                    npc.chaseTarget = null;
                     resumePatrol(true);
                     continue;
                 }
@@ -2712,6 +2752,8 @@ canvas {
                     npc.speed = npc.baseSpeed;
                     // She got her revenge — clear the grudge.
                     npc.angryAt = null;
+                    npc._invincibleTag = null;
+                    npc._giveUpChase = false;
                 }
             } else if (npc.state === 'vomit') {
                 // NPC just stepped into Puduk's gas. He stays in place for the
@@ -2748,7 +2790,7 @@ canvas {
                     npc.frame = 0; npc.animTimer = 0;
                 }
                 // If angry and player appears on screen, pursue!
-                if (npc.angrySpeedTimer > 0 && culpritOnScreen()) {
+                if (npc.angrySpeedTimer > 0 && canStartChase(npc) && culpritOnScreen()) {
                     npc.state = 'poursuit';
                     npc.frame = 0; npc.animTimer = 0;
                 }
@@ -2841,7 +2883,7 @@ canvas {
                 }
 
                 // If angry and player appears on screen, pursue!
-                if (npc.angrySpeedTimer > 0 && culpritOnScreen()) {
+                if (npc.angrySpeedTimer > 0 && canStartChase(npc) && culpritOnScreen()) {
                     npc.state = 'poursuit';
                     npc.frame = 0; npc.animTimer = 0;
                 }
