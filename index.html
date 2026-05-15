@@ -1190,8 +1190,8 @@ canvas {
             tombeFrames: 4,
             cellW: 64, cellH: 64, scale: 1.8, fps: 8,
             // Per-NPC animation framerates for walking and chasing (default = 6).
-            walkFps: 10,
-            chaseFps: 12,
+            walkFps: 8,
+            chaseFps: 10,
             frame: 0, animTimer: 0, facingLeft: false, offsetY: 20,
             // Francois sprite has less empty space above the head than maitresse,
             // so the vigilance dot needs to sit lower.
@@ -1260,7 +1260,7 @@ canvas {
             cols: 4, idleFrames: 6, walkFrames: 6, totalFrames: 6,
             tombeFrames: 4,
             cellW: 64, cellH: 64, scale: 1.8, fps: 8,
-            walkFps: 10,
+            walkFps: 8,
             frame: 0, animTimer: 0, facingLeft: false, offsetY: 20,
             // Passive NPC: no vigilance, no chase logic. Without vigilanceRadius the
             // vigilance dots, alert/angry transitions and chase code all skip him.
@@ -2653,8 +2653,13 @@ canvas {
                 }
 
                 // Target off screen (from THEIR own viewport): switch to angry patrol.
+                // Also: if the target is invincible (post-hit blink window), she
+                // treats him as "lost from sight" and stops chasing — she stays red
+                // (angrySpeedTimer keeps ticking) but patrols accelérée instead.
                 let stillVisible = maitresseOnScreen;
-                if (gameState.mode === 'multi') {
+                if ((target.headBlink || 0) > 0) {
+                    stillVisible = false;
+                } else if (gameState.mode === 'multi') {
                     const t = target;
                     let halfW, halfH;
                     if (t === player) {
