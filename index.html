@@ -621,10 +621,13 @@ canvas {
             // One-shot events from host (e.g. she just slipped, item picked, etc.)
             applyWorldEvent(msg);
         } else if (msg.type === 'request_hit_npc') {
-            // Joiner asks host to apply a hit on the maitresse.
+            // Joiner asks host to apply a hit on a specific NPC.
             if (!net.isHost) return;
-            const npc = npcs[0];
+            // Identify which NPC was hit (by name); fall back to first NPC.
+            const npc = msg.npcName ? npcs.find(n => n.name === msg.npcName) : npcs[0];
             if (!npc) return;
+            // Skip if this NPC doesn't have vigilance/slide mechanics (e.g. Puduk for now)
+            if (!npc.vigilanceRadius) return;
             if (npc.state === 'tombe' || npc.state === 'gifle') return;
             const wasSliding = npc.state === 'glisse';
             npc.state = 'glisse';
@@ -780,25 +783,30 @@ canvas {
         netWorldTickCounter++;
         if (netWorldTickCounter < 2) return;
         netWorldTickCounter = 0;
-        const npc = npcs[0];
-        if (!npc) return;
+        if (npcs.length === 0) return;
+        // Build NPCs payload (array supports multiple NPCs per map)
+        const npcsPayload = npcs.map(n => ({
+            name: n.name,
+            x: Math.round(n.x * 10) / 10,
+            y: Math.round(n.y * 10) / 10,
+            facingLeft: n.facingLeft,
+            state: n.state,
+            vigilance: n.vigilance,
+            vigilanceLocal: n.vigilanceLocal || 'calm',
+            vigilanceRemote: n.vigilanceRemote || 'calm',
+            slideKind: n.slideKind || 'h',
+            frame: n.frame,
+            fps: n.fps,
+            currentSprite: n.currentSprite,
+            totalFrames: n.totalFrames,
+            target: n.chaseTarget || null,
+        }));
         netSend({
             type: 'world_state',
-            npc: {
-                x: Math.round(npc.x * 10) / 10,
-                y: Math.round(npc.y * 10) / 10,
-                facingLeft: npc.facingLeft,
-                state: npc.state,
-                vigilance: npc.vigilance,
-                vigilanceLocal: npc.vigilanceLocal || 'calm',
-                vigilanceRemote: npc.vigilanceRemote || 'calm',
-                slideKind: npc.slideKind || 'h',
-                frame: npc.frame,
-                fps: npc.fps,
-                currentSprite: npc.currentSprite,
-                totalFrames: npc.totalFrames,
-                target: npc.chaseTarget || null,
-            },
+            // Legacy single-NPC field (for back-compat); always = first NPC
+            npc: npcsPayload[0],
+            // New: full array of NPCs on the active map
+            npcs: npcsPayload,
             items: worldItems.map(it => ({
                 id: it.id,
                 x: Math.round(it.x * 10) / 10,
@@ -815,46 +823,59 @@ canvas {
 
     function applyWorldStateFromHost(msg) {
         // Apply NPC state — interpolate positions, advance frames locally.
-        const npc = npcs[0];
-        if (npc && msg.npc) {
+        // Support both legacy 'msg.npc' (single) and new 'msg.npcs' (array).
+        const incomingNpcs = msg.npcs || (msg.npc ? [msg.npc] : []);
+        for (let i = 0; i < incomingNpcs.length && i < npcs.length; i++) {
+            // Match by name when possible (more robust than index if host swaps NPCs),
+            // else fall back to same index.
+            const incoming = incomingNpcs[i];
+            let npc = null;
+            if (incoming.name) {
+                npc = npcs.find(n => n.name === incoming.name);
+            }
+            if (!npc) npc = npcs[i];
+            if (!npc) continue;
+
             const prevState = npc.state;
-            npc._netTargetX = msg.npc.x;
-            npc._netTargetY = msg.npc.y;
+            npc._netTargetX = incoming.x;
+            npc._netTargetY = incoming.y;
             if (npc._netInitialized !== true) {
-                npc.x = msg.npc.x;
-                npc.y = msg.npc.y;
+                npc.x = incoming.x;
+                npc.y = incoming.y;
                 npc._netInitialized = true;
             }
-            npc.facingLeft = msg.npc.facingLeft;
+            npc.facingLeft = incoming.facingLeft;
             // Vigilance: host's "local" view is for the host. From joiner's perspective, swap.
-            if (msg.npc.vigilanceLocal !== undefined) {
-                npc.vigilanceRemote = msg.npc.vigilanceLocal;
-                npc.vigilanceLocal = msg.npc.vigilanceRemote || 'calm';
+            if (incoming.vigilanceLocal !== undefined) {
+                npc.vigilanceRemote = incoming.vigilanceLocal;
+                npc.vigilanceLocal = incoming.vigilanceRemote || 'calm';
             }
             // Display vigilance = what THIS player sees
-            npc.vigilance = npc.vigilanceLocal || msg.npc.vigilance;
-            npc.slideKind = msg.npc.slideKind || 'h';
+            npc.vigilance = npc.vigilanceLocal || incoming.vigilance;
+            npc.slideKind = incoming.slideKind || 'h';
             // Store the chaseTarget tag exactly as host sent it.
             // Inversion is handled in getChaseTarget() when needed.
-            npc.chaseTarget = msg.npc.target;
+            npc.chaseTarget = incoming.target;
             // State / sprite resets the frame counter to avoid jumps,
             // but only when state OR sprite changes.
-            const stateChanged = prevState !== msg.npc.state;
-            const spriteChanged = npc.currentSprite !== msg.npc.currentSprite;
-            npc.state = msg.npc.state;
-            npc.currentSprite = msg.npc.currentSprite;
-            npc.totalFrames = msg.npc.totalFrames;
-            if (msg.npc.fps) npc.fps = msg.npc.fps;
+            const stateChanged = prevState !== incoming.state;
+            const spriteChanged = npc.currentSprite !== incoming.currentSprite;
+            npc.state = incoming.state;
+            npc.currentSprite = incoming.currentSprite;
+            npc.totalFrames = incoming.totalFrames;
+            if (incoming.fps) npc.fps = incoming.fps;
             if (stateChanged || spriteChanged) {
-                npc.frame = msg.npc.frame;
+                npc.frame = incoming.frame;
                 npc.animTimer = 0;
             }
-            // State transition side-effects (sounds)
-            if (prevState !== 'glisse' && npc.state === 'glisse') {
-                startGlisseSound();
-            } else if (prevState === 'glisse' && npc.state !== 'glisse') {
-                stopGlisseSound();
-                if (npc.state === 'tombe') playSound('tombe');
+            // State transition side-effects (sounds) — only for the first NPC to avoid double sounds
+            if (i === 0) {
+                if (prevState !== 'glisse' && npc.state === 'glisse') {
+                    startGlisseSound();
+                } else if (prevState === 'glisse' && npc.state !== 'glisse') {
+                    stopGlisseSound();
+                    if (npc.state === 'tombe') playSound('tombe');
+                }
             }
         }
         // Items
@@ -1194,6 +1215,67 @@ canvas {
             stuckTimer: 0, lastProgressX: 0, lastProgressY: 0, commitDir: null, commitTimer: 0,
     };
 
+    // Puduk: 2nd kitchen NPC. He only has idle and walk sprites for now, so he just
+    // patrols passively. No vigilance, no chase, no slide/fall, no slap. When the other
+    // sprites are provided we'll wire glisse/tombe/poursuit/gifle the same way as francois.
+    const NPC_PUDUK = {
+            name: 'puduk',
+            x: 580, y: 380,
+            spawnX: 580, spawnY: 380,
+            sprites: {
+                idle: 'puduk_idle',
+                walk_h: 'puduk_walk_h',
+                walk_down: 'puduk_walk_down',
+                walk_up: 'puduk_walk_up',
+                // No glisse/tombe/poursuit/gifle yet — fall back to walk sprites so the
+                // engine never crashes if a state transition is accidentally requested.
+                // Until vigilanceRadius is set, none of these can be reached anyway.
+                glisse: 'puduk_walk_h',
+                glisse_haut: 'puduk_walk_up',
+                glisse_bas: 'puduk_walk_down',
+                glisse_diag_haut: 'puduk_walk_up',
+                glisse_diag_bas: 'puduk_walk_down',
+                tombe: 'puduk_walk_h',
+                tombe_haut: 'puduk_walk_up',
+                tombe_bas: 'puduk_walk_down',
+                tombe_diag_haut: 'puduk_walk_up',
+                tombe_diag_bas: 'puduk_walk_down',
+                poursuit: 'puduk_walk_h',
+                poursuit_bas: 'puduk_walk_down',
+                poursuit_haut: 'puduk_walk_up',
+                poursuit_diag_haut: 'puduk_walk_up',
+                poursuit_diag_bas: 'puduk_walk_down',
+                gifle: 'puduk_walk_h',
+            },
+            currentSprite: 'puduk_idle',
+            cols: 4, idleFrames: 6, walkFrames: 6, totalFrames: 6,
+            tombeFrames: 4,
+            cellW: 64, cellH: 64, scale: 1.8, fps: 6,
+            frame: 0, animTimer: 0, facingLeft: false, offsetY: 20,
+            // Passive NPC: no vigilance, no chase logic. Without vigilanceRadius the
+            // vigilance dots, alert/angry transitions and chase code all skip him.
+            vigilanceRadius: 0,
+            speed: 1.2, baseSpeed: 1.2,
+            hitbox: { w: 30, h: 14, offsetY: 12 },
+            // Patrouille de Puduk dans la cuisine. Il evite la table (x>=555, y>=200)
+            // et les meubles (y<=165 sauf au-dessous des armoires).
+            patrol: [
+                { x: 580, y: 380, wait: 120 },
+                { x: 580, y: 460 },
+                { x: 400, y: 460 },
+                { x: 400, y: 380, wait: 120 },
+                { x: 580, y: 380 },
+            ],
+            patrolIndex: 0, waitTimer: 120,
+            state: 'idle',
+            vigilance: 'calm',
+            slideDx: 0, slideDy: 0, slideLife: 0,
+            tombeTimer: 0, angrySpeedTimer: 0,
+            comboCount: 0,
+            path: null, pathIndex: 0, pathRecalcTimer: 0, pathTargetX: 0, pathTargetY: 0,
+            stuckTimer: 0, lastProgressX: 0, lastProgressY: 0, commitDir: null, commitTimer: 0,
+    };
+
     // Active NPC list (mutable so we can swap on map change).
     const npcs = [NPC_MAITRESSE];
 
@@ -1295,6 +1377,12 @@ canvas {
                 francois_poursuit_diag_haut: 'images/francois_poursuit_diag_haut.png',
                 francois_poursuit_diag_bas: 'images/francois_poursuit_diag_bas.png',
                 francois_gifle: 'images/francois_gifle.png',
+                // Puduk: 2nd kitchen NPC. Only movement sprites for now; other states
+                // fall back to the same images (no glisse/tombe/poursuit/gifle yet).
+                puduk_idle: 'images/puduk_idle.png',
+                puduk_walk_h: 'images/puduk_marche_hori.png',
+                puduk_walk_down: 'images/puduk_marche_bas.png',
+                puduk_walk_up: 'images/puduk_marche_haut.png',
             };
             const total = Object.keys(sources).length;
             let count = 0;
@@ -1700,6 +1788,19 @@ canvas {
             NPC_FRANCOIS.currentSprite = 'francois_idle';
             NPC_FRANCOIS.totalFrames = NPC_FRANCOIS.idleFrames;
             npcs.push(NPC_FRANCOIS);
+            // Reset Puduk too
+            NPC_PUDUK.x = NPC_PUDUK.spawnX;
+            NPC_PUDUK.y = NPC_PUDUK.spawnY;
+            NPC_PUDUK.state = 'idle';
+            NPC_PUDUK.vigilance = 'calm';
+            NPC_PUDUK.patrolIndex = 0;
+            NPC_PUDUK.waitTimer = 120;
+            NPC_PUDUK.frame = 0; NPC_PUDUK.animTimer = 0;
+            NPC_PUDUK.path = null; NPC_PUDUK.pathIndex = 0;
+            NPC_PUDUK.pathRecalcTimer = 0;
+            NPC_PUDUK.currentSprite = 'puduk_idle';
+            NPC_PUDUK.totalFrames = NPC_PUDUK.idleFrames;
+            npcs.push(NPC_PUDUK);
         } else {
             npcs.push(NPC_MAITRESSE);
         }
@@ -2628,6 +2729,8 @@ canvas {
         if (!skipNpcSim) {
         for (const npc of npcs) {
             if (!npc.patrol) continue;
+            // Skip passive NPCs (no slipping/falling for those without vigilance)
+            if (!npc.vigilanceRadius) continue;
             // Only slip if currently moving with intent
             if (npc.state !== 'walking' && npc.state !== 'poursuit') continue;
             // Need a recent movement direction (compute from last position)
@@ -2993,6 +3096,8 @@ canvas {
                     // Check NPC collision (any NPC currently active on this map)
                     if (!blocked) {
                         for (const npc of npcs) {
+                            // Skip passive NPCs (no vigilanceRadius = no slip/fall sprites)
+                            if (!npc.vigilanceRadius) continue;
                             // Allow hits while sliding (to extend combo) but not while falling/slapping
                             if (npc.state === 'tombe' || npc.state === 'gifle') continue;
                             const npcHb = { x: npc.x - 20, y: npc.y - 20, w: 40, h: 30 };
@@ -3002,6 +3107,7 @@ canvas {
                                     netSend({
                                         type: 'request_hit_npc',
                                         itemId: t.id,
+                                        npcName: npc.name, // identifie quel NPC est touche
                                         dx: t.dx, dy: t.dy,
                                         thrownBy: 'remote', // from host's POV, the joiner is the remote
                                     });
