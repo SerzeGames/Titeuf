@@ -1966,14 +1966,34 @@ canvas {
         if (!player.vomitActive && !player.gifleActive && player._gazCooldown === 0) {
             for (const npc of npcs) {
                 if (!npc.hasGaz) continue;
-                const gazX = npc.x + (npc.facingLeft ? +28 : -28);
-                const gazY = npc.y;
+                // Mirror the gas position logic from the renderer: based on movement direction.
+                const sprite = npc.currentSprite || '';
+                const isUp = sprite.includes('walk_up') || sprite.includes('poursuit_haut');
+                const isDown = sprite.includes('walk_down') || sprite.includes('poursuit_bas');
+                const isDiagUp = sprite.includes('diag_haut');
+                const isDiagDown = sprite.includes('diag_bas');
+                let gazOffsetX = 0, gazOffsetY = 0;
+                const D = 26;
+                if (isDiagUp) {
+                    gazOffsetX = npc.facingLeft ? +D * 0.7 : -D * 0.7;
+                    gazOffsetY = +D * 0.7;
+                } else if (isDiagDown) {
+                    gazOffsetX = npc.facingLeft ? +D * 0.7 : -D * 0.7;
+                    gazOffsetY = -D * 0.7;
+                } else if (isUp) {
+                    gazOffsetY = +D;
+                } else if (isDown) {
+                    gazOffsetY = -D;
+                } else {
+                    gazOffsetX = npc.facingLeft ? +D : -D;
+                }
+                const gazX = npc.x + gazOffsetX;
+                const gazY = npc.y + gazOffsetY;
                 const dx = player.x - gazX;
                 const dy = player.y - gazY;
                 if (Math.abs(dx) < 24 && Math.abs(dy) < 20) {
                     // VOMIT!
                     player.vomitActive = true;
-                    player.vomitTimer = 90; // ~1.5s
                     player.frame = 0;
                     player.animTimer = 0;
                     player.health = Math.max(0, player.health - 1);
@@ -2013,22 +2033,19 @@ canvas {
                 player.animTimer = 0;
             }
         } else if (player.vomitActive) {
-            // Vomit lock: Titeuf is stuck for ~1.5s, no movement, vomit sprite plays.
-            player.vomitTimer--;
+            // Vomit lock: Titeuf plays the 4-frame vomit animation once, then it ends.
+            // No timer pause on the last frame — the animation IS the duration.
             player.currentAnim = 'vomit';
             player.animTimer += 6 / 60;
             if (player.animTimer >= 1) {
                 player.animTimer = 0;
-                if (player.frame < 3) {
-                    player.frame++;
+                player.frame++;
+                if (player.frame >= 4) {
+                    // Animation finished: release lock immediately
+                    player.vomitActive = false;
+                    player.currentAnim = 'idle';
+                    player.frame = 0;
                 }
-                // Stay on last frame (frame 3)
-            }
-            if (player.vomitTimer <= 0) {
-                player.vomitActive = false;
-                player.currentAnim = 'idle';
-                player.frame = 0;
-                player.animTimer = 0;
             }
         } else {
             // Animation state (normal)
@@ -3341,14 +3358,39 @@ canvas {
         // NPC entities (maitresse in classroom, francois in kitchen)
         for (const npc of npcs) {
             // Gas cloud BEHIND Puduk (rendered before him via a slightly lower Y in
-            // the entity sort).
+            // the entity sort). Position is based on the actual direction the NPC
+            // is moving, derived from his current sprite — so the gas stays behind
+            // him whether he walks horizontally, up, down, or (later) diagonally.
             if (npc.hasGaz) {
-                // Position derrière lui : opposé à sa direction.
-                // facingLeft = true → il marche à gauche → gaz à droite
-                const gazOffsetX = npc.facingLeft ? +28 : -28;
+                // Determine movement direction from currentSprite
+                const sprite = npc.currentSprite || '';
+                const isUp = sprite.includes('walk_up') || sprite.includes('poursuit_haut');
+                const isDown = sprite.includes('walk_down') || sprite.includes('poursuit_bas');
+                const isDiagUp = sprite.includes('diag_haut');
+                const isDiagDown = sprite.includes('diag_bas');
+                let gazOffsetX = 0, gazOffsetY = 0;
+                const D = 26; // distance from NPC to gaz cloud center
+                if (isDiagUp) {
+                    // Walking diagonally upward: gas is diagonally below-back
+                    gazOffsetX = npc.facingLeft ? +D * 0.7 : -D * 0.7;
+                    gazOffsetY = +D * 0.7;
+                } else if (isDiagDown) {
+                    // Walking diagonally downward: gas is diagonally above-back
+                    gazOffsetX = npc.facingLeft ? +D * 0.7 : -D * 0.7;
+                    gazOffsetY = -D * 0.7;
+                } else if (isUp) {
+                    // Walking up: gas is below
+                    gazOffsetY = +D;
+                } else if (isDown) {
+                    // Walking down: gas is above
+                    gazOffsetY = -D;
+                } else {
+                    // Horizontal walk or idle: gas is on the opposite side of facing
+                    gazOffsetX = npc.facingLeft ? +D : -D;
+                }
                 entities.push({
                     type: 'gaz',
-                    y: npc.y - 0.5,    // slightly behind in Y sort so npc renders on top
+                    y: npc.y - 0.5 + gazOffsetY,  // slightly behind in Y sort so npc renders on top
                     x: npc.x + gazOffsetX,
                     npc: npc,
                 });
@@ -3606,11 +3648,11 @@ canvas {
                     ctx.drawImage(images.fleche, x, y, size, size);
                 }
             } else if (ent.type === 'gaz') {
-                // Animated gas cloud (8 frames of 32x32), loops at 8 fps.
+                // Animated gas cloud (8 frames of 32x32), loops at ~4 fps for a slow swirl.
                 // Rendered behind Puduk.
                 const npc = ent.npc;
                 npc._gazTimer = (npc._gazTimer || 0) + 1;
-                if (npc._gazTimer >= 7) {
+                if (npc._gazTimer >= 14) {
                     npc._gazTimer = 0;
                     npc._gazFrame = ((npc._gazFrame || 0) + 1) % 8;
                 }
