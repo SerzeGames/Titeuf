@@ -1189,6 +1189,9 @@ canvas {
             // The "tombe" sprite is only 4 frames (256x64) vs maitresse's 8 (6 filled + 2 empty)
             tombeFrames: 4,
             cellW: 64, cellH: 64, scale: 1.8, fps: 8,
+            // Per-NPC animation framerates for walking and chasing (default = 6).
+            walkFps: 10,
+            chaseFps: 12,
             frame: 0, animTimer: 0, facingLeft: false, offsetY: 20,
             // Francois sprite has less empty space above the head than maitresse,
             // so the vigilance dot needs to sit lower.
@@ -1256,7 +1259,8 @@ canvas {
             currentSprite: 'puduk_idle',
             cols: 4, idleFrames: 6, walkFrames: 6, totalFrames: 6,
             tombeFrames: 4,
-            cellW: 64, cellH: 64, scale: 1.8, fps: 6,
+            cellW: 64, cellH: 64, scale: 1.8, fps: 8,
+            walkFps: 10,
             frame: 0, animTimer: 0, facingLeft: false, offsetY: 20,
             // Passive NPC: no vigilance, no chase logic. Without vigilanceRadius the
             // vigilance dots, alert/angry transitions and chase code all skip him.
@@ -2027,21 +2031,18 @@ canvas {
 
         // Player gifle state (must be checked BEFORE normal animation)
         if (player.gifleActive) {
-            player.gifleTimer--;
+            // Play the 3-frame gifle animation once. No pause on the last frame —
+            // the anim duration itself ends the lock (like vomit).
             player.currentAnim = 'gifle';
             player.animTimer += 5 / 60;
             if (player.animTimer >= 1) {
                 player.animTimer = 0;
-                if (player.frame < 2) {
-                    player.frame++;
+                player.frame++;
+                if (player.frame >= 3) {
+                    player.gifleActive = false;
+                    player.currentAnim = 'idle';
+                    player.frame = 0;
                 }
-                // Stay on last frame (frame 2)
-            }
-            if (player.gifleTimer <= 0) {
-                player.gifleActive = false;
-                player.currentAnim = 'idle';
-                player.frame = 0;
-                player.animTimer = 0;
             }
         } else if (player.vomitActive) {
             // Vomit lock: Titeuf plays the 4-frame vomit animation once, then it ends.
@@ -2243,7 +2244,7 @@ canvas {
                         npc.patrolIndex = nearestIdx;
                         npc.state = 'walking';
                         npc.frame = 0; npc.animTimer = 0;
-                        npc.fps = 6;
+                        npc.fps = npc.walkFps || 6;
                     }
                 }
             }
@@ -2445,7 +2446,9 @@ canvas {
                 findNearestWaypoint();
                 npc.state = 'walking';
                 npc.speed = fast ? npc.baseSpeed * 2.5 : npc.baseSpeed;
-                npc.frame = 0; npc.animTimer = 0; npc.fps = 6;
+                npc.frame = 0; npc.animTimer = 0;
+                // Use per-NPC walk fps if defined, else default 6.
+                npc.fps = npc.walkFps || 6;
                 // Force fresh A* computation for the new patrol leg
                 npc.path = null; npc.pathRecalcTimer = 0;
                 npc._patrolStuck = 0;
@@ -2551,7 +2554,7 @@ canvas {
                     }
                     npc.slideKind = 'h';
                     npc.frame = 0; npc.animTimer = 0;
-                    npc.fps = 6;
+                    npc.fps = npc.chaseFps || 6;
                 }
             } else if (npc.state === 'poursuit') {
                 // Multi: refresh chase target sticky logic
@@ -2681,16 +2684,16 @@ canvas {
                 }
             } else if (npc.state === 'vomit') {
                 // NPC just stepped into Puduk's gas. He stays in place for the
-                // animation (3 frames). When done, he becomes angry — but with no
-                // specific target: he'll chase whichever player he sees first
-                // (angryAt = null -> fallback to closest visible).
+                // 3-frame animation (no pause on the last frame). When the last frame
+                // is reached, he becomes angry — but with no specific target: he'll
+                // chase whichever player he sees first (angryAt = null -> fallback to
+                // closest visible).
                 npc.currentSprite = npc.sprites.vomit;
                 npc.totalFrames = 3; npc.fps = 5;
-                npc.vomitTimer--;
-                if (npc.vomitTimer <= 0) {
+                if (npc.frame >= npc.totalFrames - 1) {
                     // Become angry: red vigilance + chase mode, but no specific culprit
                     npc.angrySpeedTimer = 420;
-                    npc.angryAt = null; // no specific culprit — first seen player gets chased
+                    npc.angryAt = null;
                     npc.vigilance = 'angry';
                     if (gameState.mode === 'multi') {
                         npc.vigilanceLocal = 'angry';
