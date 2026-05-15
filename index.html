@@ -2042,7 +2042,7 @@ canvas {
                     player.health = Math.max(0, player.health - 1);
                     player.headBlink = 180; // 3s of blink + invincibility
                     player._gazCooldown = 240; // 4s cooldown before next vomit possible
-                    playSound('vomit');
+                    broadcastSound('vomit');
                     break;
                 }
             }
