@@ -441,6 +441,7 @@ canvas {
         scorePopup: null,
         score: 0,
         health: 3,
+        headBlink: 0, // synced from peer's player_state
     };
     const camera = { x: 350, y: 280 };
 
@@ -611,6 +612,7 @@ canvas {
             remotePlayer.panique = !!msg.panique;
             if (typeof msg.score === 'number') remotePlayer.score = msg.score;
             if (typeof msg.health === 'number') remotePlayer.health = msg.health;
+            if (typeof msg.headBlink === 'number') remotePlayer.headBlink = msg.headBlink;
             // Remote player's viewport (used for symmetric detection in multi)
             if (msg.halfW) remotePlayer.halfW = msg.halfW;
             if (msg.halfH) remotePlayer.halfH = msg.halfH;
@@ -770,6 +772,9 @@ canvas {
             panique: player.panique,
             score: player.score,
             health: player.health,
+            // Invincibility frames (counts down 3s after taking damage). The host uses
+            // this to know when NOT to let the maitresse slap the joiner mid-recovery.
+            headBlink: player.headBlink,
             // Local viewport so host can apply detection using THIS player's screen size
             halfW: canvas.width / (2 * CONFIG.CAMERA_ZOOM),
             halfH: canvas.height / (2 * CONFIG.CAMERA_ZOOM),
@@ -868,14 +873,14 @@ canvas {
                 npc.frame = incoming.frame;
                 npc.animTimer = 0;
             }
-            // State transition side-effects (sounds) — only for the first NPC to avoid double sounds
-            if (i === 0) {
-                if (prevState !== 'glisse' && npc.state === 'glisse') {
-                    startGlisseSound();
-                } else if (prevState === 'glisse' && npc.state !== 'glisse') {
-                    stopGlisseSound();
-                    if (npc.state === 'tombe') playSound('tombe');
-                }
+            // State transition side-effects (sounds)
+            if (prevState !== 'glisse' && npc.state === 'glisse') {
+                startGlisseSound();
+            } else if (prevState === 'glisse' && npc.state !== 'glisse') {
+                stopGlisseSound();
+                if (npc.state === 'tombe') playSound('tombe');
+            } else if (prevState !== 'vomit' && npc.state === 'vomit') {
+                playSound('vomit');
             }
         }
         // Items
@@ -929,7 +934,7 @@ canvas {
             player.gifleActive = true;
             player.gifleTimer = 48;
             player.health = Math.max(0, player.health - 1);
-            player.headBlink = 120;
+            player.headBlink = 180; // 3s of blink + invincibility
             player.frame = 0; player.animTimer = 0;
             playSound('gifle');
         } else if (msg.event === 'tombe') {
@@ -1176,6 +1181,7 @@ canvas {
                 poursuit_diag_haut: 'francois_poursuit_diag_haut',
                 poursuit_diag_bas: 'francois_poursuit_diag_bas',
                 gifle: 'francois_gifle',
+                vomit: 'francois_vomit',
             },
             currentSprite: 'francois_idle',
             // Francois idle: 4 frames (256x64); walk: 6 frames (256x128); others: 4 frames
@@ -1389,6 +1395,7 @@ canvas {
                 francois_poursuit_diag_haut: 'images/francois_poursuit_diag_haut.png',
                 francois_poursuit_diag_bas: 'images/francois_poursuit_diag_bas.png',
                 francois_gifle: 'images/francois_gifle.png',
+                francois_vomit: 'images/francois_vomis.png',
                 // Puduk: 2nd kitchen NPC. Only movement sprites for now; other states
                 // fall back to the same images (no glisse/tombe/poursuit/gifle yet).
                 puduk_idle: 'images/puduk_idle.png',
@@ -1802,6 +1809,8 @@ canvas {
             NPC_FRANCOIS.pathRecalcTimer = 0;
             NPC_FRANCOIS.currentSprite = 'francois_idle';
             NPC_FRANCOIS.totalFrames = NPC_FRANCOIS.idleFrames;
+            NPC_FRANCOIS._gazCooldown = 0;
+            NPC_FRANCOIS.vomitTimer = 0;
             npcs.push(NPC_FRANCOIS);
             // Reset Puduk too
             NPC_PUDUK.x = NPC_PUDUK.spawnX;
@@ -1991,13 +2000,15 @@ canvas {
                 const gazY = npc.y + gazOffsetY;
                 const dx = player.x - gazX;
                 const dy = player.y - gazY;
-                if (Math.abs(dx) < 24 && Math.abs(dy) < 20) {
+                // Hitbox enlarged so the player feels the gas cloud earlier — matches
+                // the visual ~64x64 render size.
+                if (Math.abs(dx) < 36 && Math.abs(dy) < 32) {
                     // VOMIT!
                     player.vomitActive = true;
                     player.frame = 0;
                     player.animTimer = 0;
                     player.health = Math.max(0, player.health - 1);
-                    player.headBlink = 120;
+                    player.headBlink = 180; // 3s of blink + invincibility
                     player._gazCooldown = 240; // 4s cooldown before next vomit possible
                     playSound('vomit');
                     break;
@@ -2125,7 +2136,7 @@ canvas {
                         // Stop on last filled tombe frame (varies by NPC).
                         const tombeFrames = npc.tombeFrames || 6;
                         if (npc.frame < tombeFrames - 1) npc.frame++;
-                    } else if (npc.state === 'gifle' || npc.state === 'idle') {
+                    } else if (npc.state === 'gifle' || npc.state === 'idle' || npc.state === 'vomit') {
                         if (npc.frame < maxF - 1) npc.frame++;
                     } else {
                         npc.frame = (npc.frame + 1) % maxF;
@@ -2169,6 +2180,44 @@ canvas {
                     npc.frame = (npc.frame + 1) % npc.totalFrames;
                 }
                 continue;
+            }
+
+            // ===== NPC GAS COLLISION: a NPC stepping into another NPC's gas vomits =====
+            // Cooldown to avoid spam. Only triggers if the NPC isn't already in a special
+            // state (glisse/tombe/gifle/vomit).
+            if (npc._gazCooldown > 0) npc._gazCooldown--;
+            if (npc.vigilanceRadius && npc._gazCooldown === 0 &&
+                npc.state !== 'glisse' && npc.state !== 'tombe' &&
+                npc.state !== 'gifle' && npc.state !== 'vomit') {
+                for (const gazNpc of npcs) {
+                    if (gazNpc === npc) continue;
+                    if (!gazNpc.hasGaz) continue;
+                    // Same gas position logic as elsewhere (mirrored from render)
+                    const sprite = gazNpc.currentSprite || '';
+                    const isUp = sprite.includes('walk_up') || sprite.includes('poursuit_haut');
+                    const isDown = sprite.includes('walk_down') || sprite.includes('poursuit_bas');
+                    const isDiagUp = sprite.includes('diag_haut');
+                    const isDiagDown = sprite.includes('diag_bas');
+                    let gOX = 0, gOY = 0;
+                    const D = 26;
+                    if (isDiagUp) { gOX = gazNpc.facingLeft ? +D * 0.7 : -D * 0.7; gOY = +D * 0.7; }
+                    else if (isDiagDown) { gOX = gazNpc.facingLeft ? +D * 0.7 : -D * 0.7; gOY = -D * 0.7; }
+                    else if (isUp) { gOY = +D; }
+                    else if (isDown) { gOY = -D; }
+                    else { gOX = gazNpc.facingLeft ? +D : -D; }
+                    const gx = gazNpc.x + gOX;
+                    const gy = gazNpc.y + gOY;
+                    const ddx = npc.x - gx;
+                    const ddy = npc.y - gy;
+                    if (Math.abs(ddx) < 36 && Math.abs(ddy) < 32) {
+                        npc.state = 'vomit';
+                        npc.vomitTimer = 60; // ~1s
+                        npc.frame = 0; npc.animTimer = 0;
+                        npc._gazCooldown = 300; // 5s before he can vomit again
+                        playSound('vomit');
+                        break;
+                    }
+                }
             }
 
             // ========== MAITRESSE STATE MACHINE ==========
@@ -2236,6 +2285,11 @@ canvas {
                     }
                 }
                 if (!culprit || culprit.active === false) return maitresseOnScreen;
+                // Invincibility: when the culprit is in the post-hit blink window (3s),
+                // an angry NPC treats him as "not on screen" so the chase doesn't trigger
+                // (and any ongoing chase falls back to patrol via the stillVisible check).
+                // Only applies while the NPC is in chase/angry mode (vigilance red).
+                if (npc.angrySpeedTimer > 0 && (culprit.headBlink || 0) > 0) return false;
                 // Each player has their own viewport. For the local player we use canvas;
                 // for the remote we use the halfW/halfH they broadcast (falls back to local).
                 let halfW, halfH;
@@ -2563,6 +2617,9 @@ canvas {
                 }
 
                 // Caught target? Rectangle-based check
+                // But: target is invincible during the 3s blink window after being hit.
+                const targetIsInvincible = (target === player && player.headBlink > 0) ||
+                                           (target === remotePlayer && (remotePlayer.headBlink || 0) > 0);
                 const reachW = 56, reachH = 56;
                 const giflerHb = {
                     x: npc.x - reachW / 2,
@@ -2571,7 +2628,7 @@ canvas {
                     h: reachH,
                 };
                 const targetHb = playerHitbox(target.x, target.y);
-                if (rectsOverlap(giflerHb, targetHb)) {
+                if (!targetIsInvincible && rectsOverlap(giflerHb, targetHb)) {
                     npc.state = 'gifle';
                     npc.frame = 0; npc.animTimer = 0;
                     npc.tombeTimer = 48;
@@ -2580,7 +2637,7 @@ canvas {
                         player.gifleActive = true;
                         player.gifleTimer = 48;
                         player.health = Math.max(0, player.health - 1);
-                        player.headBlink = 120;
+                        player.headBlink = 180; // 3s of blink + invincibility
                         player.frame = 0; player.animTimer = 0;
                         // We're slapped: broadcast so the peer hears it too.
                         broadcastSound('gifle');
@@ -2621,6 +2678,27 @@ canvas {
                     npc.speed = npc.baseSpeed;
                     // She got her revenge — clear the grudge.
                     npc.angryAt = null;
+                }
+            } else if (npc.state === 'vomit') {
+                // NPC just stepped into Puduk's gas. He stays in place for the
+                // animation (3 frames). When done, he becomes angry — but with no
+                // specific target: he'll chase whichever player he sees first
+                // (angryAt = null -> fallback to closest visible).
+                npc.currentSprite = npc.sprites.vomit;
+                npc.totalFrames = 3; npc.fps = 5;
+                npc.vomitTimer--;
+                if (npc.vomitTimer <= 0) {
+                    // Become angry: red vigilance + chase mode, but no specific culprit
+                    npc.angrySpeedTimer = 420;
+                    npc.angryAt = null; // no specific culprit — first seen player gets chased
+                    npc.vigilance = 'angry';
+                    if (gameState.mode === 'multi') {
+                        npc.vigilanceLocal = 'angry';
+                        npc.vigilanceRemote = 'angry';
+                    }
+                    // Resume movement in walking state (the state-machine below will
+                    // upgrade to 'poursuit' if a player is visible).
+                    resumePatrol(true);
                 }
             } else if (npc.state === 'idle') {
                 const target = npc.patrol[npc.patrolIndex];
@@ -2745,7 +2823,7 @@ canvas {
                     if (npc.frame < tombeFrames - 1) {
                         npc.frame++;
                     }
-                } else if (npc.state === 'gifle' || npc.state === 'idle') {
+                } else if (npc.state === 'gifle' || npc.state === 'idle' || npc.state === 'vomit') {
                     // Play once, stop on last frame
                     if (npc.frame < npc.totalFrames - 1) {
                         npc.frame++;
