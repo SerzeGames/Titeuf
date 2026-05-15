@@ -2560,6 +2560,18 @@ canvas {
                 // Multi: refresh chase target sticky logic
                 updateChaseTarget(npc);
                 const target = getChaseTarget(npc);
+
+                // If the target is invincible (post-hit blink window), stop chasing
+                // RIGHT NOW — before moving, before any facing/sprite updates. The NPC
+                // falls back to angry patrol; he stays red (angrySpeedTimer keeps ticking)
+                // but no longer hunts the invincible target. This prevents the "spinning
+                // on the spot + repeated slap attempts" oscillation that happens when
+                // the NPC is on top of an invincible target.
+                if ((target.headBlink || 0) > 0) {
+                    resumePatrol(true);
+                    continue;
+                }
+
                 const pdx = target.x - npc.x;
                 const pdy = target.y - npc.y;
                 const pdist = Math.sqrt(pdx * pdx + pdy * pdy);
