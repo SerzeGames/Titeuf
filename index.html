@@ -1220,8 +1220,8 @@ canvas {
     // sprites are provided we'll wire glisse/tombe/poursuit/gifle the same way as francois.
     const NPC_PUDUK = {
             name: 'puduk',
-            x: 580, y: 380,
-            spawnX: 580, spawnY: 380,
+            x: 700, y: 200,
+            spawnX: 700, spawnY: 200,
             sprites: {
                 idle: 'puduk_idle',
                 walk_h: 'puduk_walk_h',
@@ -1257,14 +1257,23 @@ canvas {
             vigilanceRadius: 0,
             speed: 1.2, baseSpeed: 1.2,
             hitbox: { w: 30, h: 14, offsetY: 12 },
-            // Patrouille de Puduk dans la cuisine. Il evite la table (x>=555, y>=200)
-            // et les meubles (y<=165 sauf au-dessous des armoires).
+            // Patrouille de Puduk : large parcours qui couvre l'ensemble de la cuisine
+            // tout en evitant la zone centrale ou Francois patrouille principalement.
+            // Privilegie : zone droite (au-dessus de la table), zone basse, coin droit en bas,
+            // et coin haut-gauche (sous le mur, pres de la porte fermee).
+            // Colliders cuisine: mur haut y<120, bord 0-18/750-768/y>494,
+            //   meubles y=120-165, table x=585-730 y=210-315.
             patrol: [
-                { x: 580, y: 380, wait: 120 },
-                { x: 580, y: 460 },
-                { x: 400, y: 460 },
-                { x: 400, y: 380, wait: 120 },
-                { x: 580, y: 380 },
+                { x: 700, y: 200, wait: 90 },     // haut-droite, sous l'evier droit
+                { x: 700, y: 350 },                // descend a droite de la table
+                { x: 700, y: 460, wait: 60 },     // coin bas-droite
+                { x: 450, y: 460 },                // bas, traverse vers la gauche
+                { x: 80,  y: 460, wait: 60 },     // coin bas-gauche
+                { x: 80,  y: 250 },                // monte le long du mur gauche
+                { x: 80,  y: 180, wait: 90 },     // sous la porte fermee (haut-gauche)
+                { x: 280, y: 200 },                // sous les meubles centre-gauche
+                { x: 500, y: 200 },                // sous les meubles centre-droit
+                { x: 700, y: 200 },                // retour au point de depart
             ],
             patrolIndex: 0, waitTimer: 120,
             state: 'idle',
