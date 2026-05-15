@@ -1255,6 +1255,10 @@ canvas {
             // Passive NPC: no vigilance, no chase logic. Without vigilanceRadius the
             // vigilance dots, alert/angry transitions and chase code all skip him.
             vigilanceRadius: 0,
+            // Puduk leaves a gas cloud behind him. The cloud is rendered behind his
+            // sprite (lower Y in the entity sort), follows him, and makes Titeuf
+            // vomit if he steps into it.
+            hasGaz: true,
             speed: 1.2, baseSpeed: 1.2,
             hitbox: { w: 30, h: 14, offsetY: 12 },
             // Patrouille de Puduk : large parcours qui couvre l'ensemble de la cuisine
@@ -1391,6 +1395,8 @@ canvas {
                 puduk_walk_h: 'images/puduk_marche_hori.png',
                 puduk_walk_down: 'images/puduk_marche_bas.png',
                 puduk_walk_up: 'images/puduk_marche_haut.png',
+                gaz: 'images/gaz.png',
+                titeuf_vomit: 'images/titeuf_vomit.png',
             };
             const total = Object.keys(sources).length;
             let count = 0;
@@ -1427,6 +1433,7 @@ canvas {
             music_classe: 'son/classe.mp3',
             music_cuisine: 'son/cuisine.mp3',
             victoire: 'son/victoire.mp3',
+            vomit: 'son/vomit.mp3',
         };
         for (const [key, src] of Object.entries(sources)) {
             const a = new Audio();
@@ -1836,6 +1843,9 @@ canvas {
         player.score = 0;
         player.panique = false;
         player.gifleActive = false;
+        player.vomitActive = false;
+        player.vomitTimer = 0;
+        player._gazCooldown = 0;
         player.headBlink = 0;
         player.scorePopup = null;
         player.frame = 0; player.animTimer = 0;
@@ -1947,6 +1957,33 @@ canvas {
         }
 
         player.moving = (input.dx !== 0 || input.dy !== 0);
+        // Block movement during vomit lock
+        if (player.vomitActive) player.moving = false;
+
+        // ===== GAS COLLISION: stepping into Puduk's gas cloud makes Titeuf vomit =====
+        // Cooldown so he can't be locked in an endless vomit loop while standing near.
+        if (player._gazCooldown > 0) player._gazCooldown--;
+        if (!player.vomitActive && !player.gifleActive && player._gazCooldown === 0) {
+            for (const npc of npcs) {
+                if (!npc.hasGaz) continue;
+                const gazX = npc.x + (npc.facingLeft ? +28 : -28);
+                const gazY = npc.y;
+                const dx = player.x - gazX;
+                const dy = player.y - gazY;
+                if (Math.abs(dx) < 24 && Math.abs(dy) < 20) {
+                    // VOMIT!
+                    player.vomitActive = true;
+                    player.vomitTimer = 90; // ~1.5s
+                    player.frame = 0;
+                    player.animTimer = 0;
+                    player.health = Math.max(0, player.health - 1);
+                    player.headBlink = 120;
+                    player._gazCooldown = 240; // 4s cooldown before next vomit possible
+                    playSound('vomit');
+                    break;
+                }
+            }
+        }
 
         // Track last direction for idle
         if (player.moving) {
@@ -1971,6 +2008,24 @@ canvas {
             }
             if (player.gifleTimer <= 0) {
                 player.gifleActive = false;
+                player.currentAnim = 'idle';
+                player.frame = 0;
+                player.animTimer = 0;
+            }
+        } else if (player.vomitActive) {
+            // Vomit lock: Titeuf is stuck for ~1.5s, no movement, vomit sprite plays.
+            player.vomitTimer--;
+            player.currentAnim = 'vomit';
+            player.animTimer += 6 / 60;
+            if (player.animTimer >= 1) {
+                player.animTimer = 0;
+                if (player.frame < 3) {
+                    player.frame++;
+                }
+                // Stay on last frame (frame 3)
+            }
+            if (player.vomitTimer <= 0) {
+                player.vomitActive = false;
                 player.currentAnim = 'idle';
                 player.frame = 0;
                 player.animTimer = 0;
@@ -3285,6 +3340,19 @@ canvas {
 
         // NPC entities (maitresse in classroom, francois in kitchen)
         for (const npc of npcs) {
+            // Gas cloud BEHIND Puduk (rendered before him via a slightly lower Y in
+            // the entity sort).
+            if (npc.hasGaz) {
+                // Position derrière lui : opposé à sa direction.
+                // facingLeft = true → il marche à gauche → gaz à droite
+                const gazOffsetX = npc.facingLeft ? +28 : -28;
+                entities.push({
+                    type: 'gaz',
+                    y: npc.y - 0.5,    // slightly behind in Y sort so npc renders on top
+                    x: npc.x + gazOffsetX,
+                    npc: npc,
+                });
+            }
             entities.push({
                 type: 'npc',
                 y: npc.y,
@@ -3357,6 +3425,9 @@ canvas {
                 if (player.currentAnim === 'gifle') {
                     spriteImg = images.titeuf_gifle;
                     pCols = 4; pTotalFrames = 3;
+                } else if (player.currentAnim === 'vomit') {
+                    spriteImg = images.titeuf_vomit;
+                    pCols = 4; pTotalFrames = 4;
                 } else {
                     spriteImg = images[player.currentAnim];
                 }
@@ -3397,6 +3468,9 @@ canvas {
                 const rAnim = remotePlayer.currentAnim || 'idle';
                 if (rAnim === 'gifle') {
                     rSpriteImg = images.titeuf_gifle;
+                    rCols = 4;
+                } else if (rAnim === 'vomit') {
+                    rSpriteImg = images.titeuf_vomit;
                     rCols = 4;
                 } else {
                     rSpriteImg = images[rAnim] || images.idle;
@@ -3531,6 +3605,29 @@ canvas {
                 } else {
                     ctx.drawImage(images.fleche, x, y, size, size);
                 }
+            } else if (ent.type === 'gaz') {
+                // Animated gas cloud (8 frames of 32x32), loops at 8 fps.
+                // Rendered behind Puduk.
+                const npc = ent.npc;
+                npc._gazTimer = (npc._gazTimer || 0) + 1;
+                if (npc._gazTimer >= 7) {
+                    npc._gazTimer = 0;
+                    npc._gazFrame = ((npc._gazFrame || 0) + 1) % 8;
+                }
+                const fIdx = npc._gazFrame || 0;
+                const FW = 32, FH = 32;
+                const sx = (fIdx % 4) * FW;
+                const sy = Math.floor(fIdx / 4) * FH;
+                // Render size : ~64x64 px (2x sprite size for visibility)
+                const renderW = 64, renderH = 64;
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(
+                    images.gaz,
+                    sx, sy, FW, FH,
+                    ent.x - renderW / 2,
+                    ent.y - renderH / 2 - 4,  // slightly above ground
+                    renderW, renderH
+                );
             }
         }
 
@@ -4239,6 +4336,9 @@ canvas {
         player.panique = false;
         player.mashCount = 0;
         player.gifleActive = false;
+        player.vomitActive = false;
+        player.vomitTimer = 0;
+        player._gazCooldown = 0;
         player.headBlink = 0;
         player.scorePopup = null;
         remotePlayer.score = 0;
