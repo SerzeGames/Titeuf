@@ -457,6 +457,11 @@ canvas {
         // Victoire screen state
         victoireAnim: 0,        // 0->1 slide-down progress
         victoirePlayers: [],    // [{nickname, score, isLocal}] sorted by score desc, set on entry
+        // Game over state (player lost all stars)
+        koActive: false,        // playing KO animation in-world
+        koFrame: 0,             // 0..7 (8 frames of titeuf_ko.png)
+        koTimer: 0,             // frame counter for the 6 fps KO anim
+        gameoverAnim: 0,        // 0->1 slide-down progress for gameover.png
     };
 
     // ========== MULTIPLAYER (PeerJS) ==========
@@ -736,6 +741,18 @@ canvas {
             if (typeof msg.score === 'number') remotePlayer.score = msg.score;
             if (msg.nickname) net.peerNickname = msg.nickname;
             triggerVictory(false);
+        } else if (msg.type === 'gameover') {
+            // The other player died. Sync our screen to gameover too.
+            triggerGameOver(false);
+        } else if (msg.type === 'goto_menu_from_gameover') {
+            // Other player pressed B/A on the game-over screen. We follow.
+            currentMap = 'classe';
+            setActiveNpcForMap('classe');
+            remotePlayer.active = false;
+            gameState.screen = 'menu';
+            gameState.koActive = false;
+            restartMusicFromStart();
+            cleanupNet();
         } else if (msg.type === 'goto_cuisine') {
             // The other player pressed A on the victoire screen — follow them
             // into the kitchen so we stay together for the post-victory exploration.
@@ -805,6 +822,9 @@ canvas {
             currentSprite: n.currentSprite,
             totalFrames: n.totalFrames,
             target: n.chaseTarget || null,
+            // Used by the joiner for the dot/excla blink animation that warns
+            // the player the NPC is about to calm down.
+            angrySpeedTimer: n.angrySpeedTimer || 0,
         }));
         netSend({
             type: 'world_state',
@@ -861,6 +881,10 @@ canvas {
             // Store the chaseTarget tag exactly as host sent it.
             // Inversion is handled in getChaseTarget() when needed.
             npc.chaseTarget = incoming.target;
+            // Sync for the blink animation
+            if (typeof incoming.angrySpeedTimer === 'number') {
+                npc.angrySpeedTimer = incoming.angrySpeedTimer;
+            }
             // State / sprite resets the frame counter to avoid jumps,
             // but only when state OR sprite changes.
             const stateChanged = prevState !== incoming.state;
@@ -937,6 +961,10 @@ canvas {
             player.headBlink = 180; // 3s of blink + invincibility
             player.frame = 0; player.animTimer = 0;
             playSound('gifle');
+            // Local death triggers game-over (and broadcasts to the host)
+            if (player.health <= 0) {
+                triggerGameOver(true);
+            }
         } else if (msg.event === 'tombe') {
             playSound('tombe');
         } else if (msg.event === 'drop') {
@@ -1200,9 +1228,9 @@ canvas {
             // his walk animation plays faster too), and chases just slightly faster
             // — always above the maitresse but very escapable.
             // Maitresse patrol = 1.2  / chase = 1.2 * 3.7 = 4.44
-            // Francois  patrol = 1.7  / chase = 1.7 * 2.75 = 4.68 (~5% faster than maitresse)
+            // Francois  patrol = 1.7  / chase = 1.7 * 2.6 = 4.42 (~same as maitresse)
             speed: 1.7, baseSpeed: 1.7,
-            chaseSpeedMultiplier: 2.75,
+            chaseSpeedMultiplier: 2.6,
             hitbox: { w: 30, h: 14, offsetY: 12 },
             // Patrol around the kitchen (avoiding walls, counters and table)
             // Kitchen colliders: top wall y<120, side walls 0-18 / 750-768,
@@ -1377,6 +1405,8 @@ canvas {
                 point_excla: 'images/pointexcla.png',
                 confusion_etoiles: 'images/etoiles_confusion.png',
                 victoire_bg: 'images/victoire.png',
+                gameover_bg: 'images/gameover.png',
+                titeuf_ko: 'images/ko.png',
                 map_cuisine: 'images/cuisine.png',
                 // Francois sprites (kitchen NPC)
                 francois_idle: 'images/francois_idle.png',
@@ -1445,6 +1475,8 @@ canvas {
             music_cuisine: 'son/cuisine.mp3',
             victoire: 'son/victoire.mp3',
             vomit: 'son/vomit.mp3',
+            ko: 'son/ko.mp3',
+            gameover: 'son/gameover.mp3',
         };
         for (const [key, src] of Object.entries(sources)) {
             const a = new Audio();
@@ -1765,6 +1797,30 @@ canvas {
 
     // ========== VICTOIRE / FIN DE PARTIE ==========
     // Triggered when a player walks into the exit door with score >= 8.
+    // ========== GAME OVER ==========
+    // Triggered when player.health reaches 0 from a slap.
+    // Plays a KO animation in-game, then slides the game-over screen down.
+    // In multi, syncs both clients to game over.
+    function triggerGameOver(triggeredByLocal) {
+        if (gameState.screen === 'gameover' || gameState.koActive) return;
+        // Phase 1: KO animation in the world (8 frames, ~1.3s)
+        // Music keeps playing during the KO — we only cut it when the gameover
+        // screen actually slides in (handled in update()).
+        gameState.koActive = true;
+        gameState.koFrame = 0;
+        gameState.koTimer = 0;
+        gameState.gameoverAnim = 0;
+        player.gifleActive = false;
+        player.vomitActive = false;
+        player.panique = false;
+        stopGlisseSound();
+        playSound('ko');
+        // Notify the other player so both screens are in sync
+        if (triggeredByLocal && gameState.mode === 'multi' && net.conn && net.conn.open) {
+            netSend({ type: 'gameover' });
+        }
+    }
+
     // In multi, syncs both clients to the 'victoire' screen with both scores.
     function triggerVictory(triggeredByLocal) {
         if (gameState.screen === 'victoire') return; // already won, ignore
@@ -1903,6 +1959,33 @@ canvas {
     function update(dt) {
         const input = getInput();
         const raw = getRawInput();
+
+        // ===== KO ANIMATION PHASE =====
+        // When a player loses his last star, we play an 8-frame KO animation (~1.3s)
+        // in-world, then slide the game-over screen down. During the KO phase, all
+        // input and game logic is frozen except this counter.
+        if (gameState.koActive) {
+            gameState.koTimer++;
+            // 10 frames per sprite frame = 6 fps
+            if (gameState.koTimer >= 10) {
+                gameState.koTimer = 0;
+                gameState.koFrame++;
+                if (gameState.koFrame >= 8) {
+                    // KO animation finished -> show game-over screen.
+                    // NOW we cut the level music and play the gameover jingle, which
+                    // syncs the music change with the screen slide-in.
+                    try {
+                        if (sounds.music_classe) { sounds.music_classe.pause(); sounds.music_classe.currentTime = 0; }
+                        if (sounds.music_cuisine) { sounds.music_cuisine.pause(); sounds.music_cuisine.currentTime = 0; }
+                    } catch (_) {}
+                    playSound('gameover');
+                    gameState.koActive = false;
+                    gameState.screen = 'gameover';
+                    gameState.gameoverAnim = 0;
+                }
+            }
+            return; // freeze everything else during KO
+        }
 
         // In kitchen map: ESC / B returns to menu (escape hatch from solo exploration)
         if (currentMap === 'cuisine') {
@@ -2085,6 +2168,11 @@ canvas {
                     player.vomitActive = false;
                     player.currentAnim = 'idle';
                     player.frame = 0;
+                    // If Titeuf vomited his last HP, chain into the KO anim now that
+                    // the vomit animation has played out fully.
+                    if (player.health <= 0) {
+                        triggerGameOver(true);
+                    }
                 }
             }
         } else {
@@ -2705,6 +2793,10 @@ canvas {
                         player.frame = 0; player.animTimer = 0;
                         // We're slapped: broadcast so the peer hears it too.
                         broadcastSound('gifle');
+                        // Game over: if THIS player just lost his last star, trigger KO.
+                        if (player.health <= 0) {
+                            triggerGameOver(true);
+                        }
                     } else {
                         // Target is the remote player. Notify them; the world_event
                         // will play the sound on their side, so we just play locally here.
@@ -3173,6 +3265,7 @@ canvas {
                     // NPC trips on it later we blame the right player (even if they
                     // already walked far away / off the NPC's screen).
                     entry.droppedBy = 'local';
+                    // 1-second cooldown so the player can't immediately re-grab his own trap.
                     entry.pickupCooldown = 60;
                     // Multi sync
                     if (gameState.mode === 'multi' && !net.isHost) {
@@ -3411,6 +3504,8 @@ canvas {
                         // Track who dropped/threw it — used to blame the right player
                         // when the NPC trips on this trap later.
                         entry.droppedBy = t.thrownBy || 'local';
+                        // 1-second cooldown so the thrower can't instantly re-grab it.
+                        entry.pickupCooldown = 60;
                         if (gameState.mode === 'multi' && !net.isHost) {
                             entry._localDropCooldown = 60;
                             entry._netTargetX = t.x;
@@ -3441,6 +3536,8 @@ canvas {
                         entry.respawnTimer = 0;
                         entry.dropped = true;
                         entry.droppedBy = t.thrownBy || 'local';
+                        // 1-second cooldown so the thrower can't instantly re-grab it.
+                        entry.pickupCooldown = 60;
                         if (gameState.mode === 'multi' && !net.isHost) {
                             entry._localDropCooldown = 60;
                             entry._netTargetX = t.x;
@@ -3618,7 +3715,11 @@ canvas {
                 let pCellW = CONFIG.SPRITE_CELL_W;
                 let pCellH = CONFIG.SPRITE_CELL_H;
                 let pTotalFrames = ANIM_FRAMES[player.currentAnim] || 5;
-                if (player.currentAnim === 'gifle') {
+                // KO takes priority over everything: 8 frames @ 6 fps from gameState.koFrame
+                if (gameState.koActive) {
+                    spriteImg = images.titeuf_ko;
+                    pCols = 4; pTotalFrames = 8;
+                } else if (player.currentAnim === 'gifle') {
                     spriteImg = images.titeuf_gifle;
                     pCols = 4; pTotalFrames = 3;
                 } else if (player.currentAnim === 'vomit') {
@@ -3627,8 +3728,9 @@ canvas {
                 } else {
                     spriteImg = images[player.currentAnim];
                 }
-                const col = player.frame % pCols;
-                const row = Math.floor(player.frame / pCols);
+                const koFrame = gameState.koActive ? Math.min(7, gameState.koFrame) : player.frame;
+                const col = koFrame % pCols;
+                const row = Math.floor(koFrame / pCols);
                 const srcX = col * pCellW;
                 const srcY = row * pCellH;
 
@@ -3831,9 +3933,23 @@ canvas {
         }
 
         // ========== VIGILANCE DOTS (world space, above NPC heads) ==========
+        // Helper: should we hide the dot/excla this frame to produce a blink? Yes when
+        // the NPC is angry-red and the angrySpeedTimer is near expiration. The blink
+        // speeds up as the timer runs out — gives the player a clear "she's calming
+        // down" warning.
+        const shouldBlinkAngry = (npc) => {
+            if ((npc.angrySpeedTimer || 0) <= 0) return false;
+            if (npc.angrySpeedTimer > 120) return false; // only last ~2s
+            // Faster blink as time runs out: 12 frames period when t<120, 6 frames when t<60.
+            const period = npc.angrySpeedTimer > 60 ? 12 : 6;
+            return Math.floor(Date.now() / (period * 16.67)) % 2 === 0;
+        };
+
         for (const npc of npcs) {
             if (!npc.vigilanceRadius) continue;
             if (npc.state === 'tombe' || npc.state === 'glisse') continue; // no dot when down
+            // Skip rendering entirely on blink-off frames (only when angry)
+            if (npc.vigilance === 'angry' && shouldBlinkAngry(npc)) continue;
             const nRH = npc.cellH * npc.scale;
             const oY = npc.offsetY || 12;
             const dotImg = npc.vigilance === 'angry' ? images.point_rouge
@@ -3936,6 +4052,8 @@ canvas {
         for (const npc of npcs) {
             if (!npc.vigilanceRadius) continue;
             if (npc.state === 'tombe' || npc.state === 'glisse') continue;
+            // Same blink logic as in-world dots
+            if (npc.vigilance === 'angry' && shouldBlinkAngry(npc)) continue;
             const isChasingMe = npc.state === 'poursuit' && getChaseTarget(npc) === player;
             const dotImg = isChasingMe ? images.point_excla
                          : npc.vigilance === 'angry' ? images.point_rouge
@@ -4368,6 +4486,47 @@ canvas {
     }
 
     // ========== VICTOIRE SCREEN ==========
+    // ========== GAME OVER SCREEN ==========
+    function updateGameover(dt) {
+        if (gameState.gameoverAnim < 1) {
+            gameState.gameoverAnim = Math.min(1, gameState.gameoverAnim + 1 / 30);
+        }
+        // Wait until slide-in is done before allowing input.
+        const inp = pollScreenInput();
+        if ((inp.aPressed || inp.bPressed) && gameState.gameoverAnim >= 1) {
+            // Tell peer we're leaving, then disconnect cleanly
+            if (gameState.mode === 'multi' && net.conn && net.conn.open) {
+                try { netSend({ type: 'goto_menu_from_gameover' }); } catch (_) {}
+                cleanupNet();
+            }
+            currentMap = 'classe';
+            setActiveNpcForMap('classe');
+            remotePlayer.active = false;
+            gameState.screen = 'menu';
+            gameState.koActive = false;
+            restartMusicFromStart();
+        }
+    }
+
+    function renderGameover() {
+        const cw = canvas.width, ch = canvas.height;
+        ctx.fillStyle = '#f4c41e';
+        ctx.fillRect(0, 0, cw, ch);
+        const bg = images.gameover_bg;
+        if (bg && bg.complete) {
+            // Slide down animation (same easing as victoire)
+            const ease = 1 - Math.pow(1 - gameState.gameoverAnim, 3);
+            const ratio = Math.max(cw / bg.width, ch / bg.height);
+            const dw = bg.width * ratio;
+            const dh = bg.height * ratio;
+            const finalY = (ch - dh) / 2;
+            const startY = -dh;
+            const dy = startY + (finalY - startY) * ease;
+            const bgX = (cw - dw) / 2;
+            ctx.drawImage(bg, bgX, dy, dw, dh);
+        }
+    }
+
     function updateVictoire(dt) {
         if (gameState.victoireAnim < 1) {
             gameState.victoireAnim = Math.min(1, gameState.victoireAnim + 1 / 30);
@@ -4544,6 +4703,10 @@ canvas {
         remotePlayer.health = 3;
         gameState.victoireAnim = 0;
         gameState.victoirePlayers = [];
+        gameState.koActive = false;
+        gameState.koFrame = 0;
+        gameState.koTimer = 0;
+        gameState.gameoverAnim = 0;
         inventory.item = null;
         inventory.owned = [];
         inventory.showAnimActive = false;
@@ -4585,6 +4748,7 @@ canvas {
             else if (gameState.screen === 'lobby') updateLobby(FRAME_TIME);
             else if (gameState.screen === 'defi') updateDefi(FRAME_TIME);
             else if (gameState.screen === 'victoire') updateVictoire(FRAME_TIME);
+            else if (gameState.screen === 'gameover') updateGameover(FRAME_TIME);
             else update(FRAME_TIME);
             accumulator -= FRAME_TIME;
         }
@@ -4592,6 +4756,7 @@ canvas {
         else if (gameState.screen === 'lobby') renderLobby();
         else if (gameState.screen === 'defi') renderDefi();
         else if (gameState.screen === 'victoire') renderVictoire();
+        else if (gameState.screen === 'gameover') renderGameover();
         else render();
         requestAnimationFrame(gameLoop);
     }
