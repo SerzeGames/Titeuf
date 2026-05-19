@@ -1406,6 +1406,8 @@ canvas {
                 confusion_etoiles: 'images/etoiles_confusion.png',
                 victoire_bg: 'images/victoire.png',
                 gameover_bg: 'images/gameover.png',
+                pause_bg: 'images/pause.png',
+                selection: 'images/selection.png',
                 titeuf_ko: 'images/ko.png',
                 map_cuisine: 'images/cuisine.png',
                 // Francois sprites (kitchen NPC)
@@ -1477,6 +1479,7 @@ canvas {
             vomit: 'son/vomit.mp3',
             ko: 'son/ko.mp3',
             gameover: 'son/gameover.mp3',
+            pause: 'son/pause.mp3',
         };
         for (const [key, src] of Object.entries(sources)) {
             const a = new Audio();
@@ -1553,6 +1556,8 @@ canvas {
         lx: 0, ly: 0,
         dpad: { up: false, down: false, left: false, right: false },
         a: false, aPrev: false,
+        b: false, bPrev: false,
+        select: false, selectPrev: false,
         lb: false, lbPrev: false,
         rb: false, rbPrev: false,
     };
@@ -1577,6 +1582,12 @@ canvas {
             // A button (Xbox: button 0)
             gamepad.aPrev = gamepad.a;
             gamepad.a = gp.buttons[0] && gp.buttons[0].pressed;
+            // B button (Xbox: button 1)
+            gamepad.bPrev = gamepad.b;
+            gamepad.b = gp.buttons[1] && gp.buttons[1].pressed;
+            // Select / Back / Share button (button 8 in standard mapping)
+            gamepad.selectPrev = gamepad.select;
+            gamepad.select = gp.buttons[8] && gp.buttons[8].pressed;
             // Bumpers: LB = button 4, RB = button 5 (standard mapping)
             gamepad.lbPrev = gamepad.lb;
             gamepad.rbPrev = gamepad.rb;
@@ -1962,6 +1973,33 @@ canvas {
     function update(dt) {
         const input = getInput();
         const raw = getRawInput();
+
+        // ===== PAUSE: press Select / Tab to open the inventory pause screen =====
+        // Disabled during KO/gameover/victoire (those screens have their own input).
+        const selectPressed = (keys['Tab'] && !keys['_prevSelect'])
+                           || (keys['ShiftLeft'] && !keys['_prevSelect'])
+                           || (gamepad.select && !gamepad.selectPrev);
+        keys['_prevSelect'] = keys['Tab'] || keys['ShiftLeft'];
+        if (selectPressed && !gameState.koActive) {
+            gameState.screen = 'pause';
+            playSound('pause');
+            // Initialize edge tracking for direction inputs: whatever is currently
+            // held (e.g. ArrowLeft if Titeuf was just moving) is treated as "already
+            // pressed", so the player must release and press again to navigate.
+            gameState._pauseLeftHeld = !!(keys['ArrowLeft'] || keys['KeyQ'] || gamepad.dpad.left || (gamepad.lx || 0) < -0.5);
+            gameState._pauseRightHeld = !!(keys['ArrowRight'] || keys['KeyD'] || gamepad.dpad.right || (gamepad.lx || 0) > 0.5);
+            // Pause background music while the inventory screen is open
+            try {
+                if (sounds.music_classe && !sounds.music_classe.paused) {
+                    sounds.music_classe.pause();
+                    gameState._musicWasPlaying = 'music_classe';
+                } else if (sounds.music_cuisine && !sounds.music_cuisine.paused) {
+                    sounds.music_cuisine.pause();
+                    gameState._musicWasPlaying = 'music_cuisine';
+                }
+            } catch (_) {}
+            return;
+        }
 
         // ===== KO ANIMATION PHASE =====
         // When a player loses his last star, we play an 8-frame KO animation (~1.3s)
@@ -4540,6 +4578,137 @@ canvas {
         }
     }
 
+    // ========== PAUSE / INVENTORY SCREEN ==========
+    function updatePause(dt) {
+        pollGamepad();
+        // Same Select edge detection — second press closes the pause screen.
+        const selectPressed = (keys['Tab'] && !keys['_prevSelect'])
+                           || (keys['ShiftLeft'] && !keys['_prevSelect'])
+                           || (gamepad.select && !gamepad.selectPrev);
+        keys['_prevSelect'] = keys['Tab'] || keys['ShiftLeft'];
+        if (selectPressed) {
+            // Close pause, resume game
+            playSound('pause');
+            gameState.screen = 'game';
+            try {
+                const which = gameState._musicWasPlaying;
+                if (which && sounds[which]) {
+                    sounds[which].play().catch(() => {});
+                }
+            } catch (_) {}
+            gameState._musicWasPlaying = null;
+            return;
+        }
+
+        // Inventory navigation: directional inputs (arrows / dpad / left stick),
+        // or LB/RB / [ / ] cycle through the selected item.
+        // We track edge state in gameState (initialized to current input state when
+        // pause was opened) so a held movement key from gameplay doesn't immediately
+        // trigger navigation + loot sound.
+        if (inventory.owned && inventory.owned.length > 0) {
+            const leftHeld = !!(keys['ArrowLeft'] || keys['KeyQ'] || gamepad.dpad.left || (gamepad.lx || 0) < -0.5);
+            const rightHeld = !!(keys['ArrowRight'] || keys['KeyD'] || gamepad.dpad.right || (gamepad.lx || 0) > 0.5);
+            const leftEdge = leftHeld && !gameState._pauseLeftHeld;
+            const rightEdge = rightHeld && !gameState._pauseRightHeld;
+            gameState._pauseLeftHeld = leftHeld;
+            gameState._pauseRightHeld = rightHeld;
+
+            // Bumpers / brackets (edge based on gamepad / key state)
+            const rbPressed = (gamepad.rb && !gamepad.rbPrev) || (keys['BracketRight'] && !keys['_prevPauseBR']);
+            const lbPressed = (gamepad.lb && !gamepad.lbPrev) || (keys['BracketLeft'] && !keys['_prevPauseBL']);
+            keys['_prevPauseBR'] = keys['BracketRight'];
+            keys['_prevPauseBL'] = keys['BracketLeft'];
+
+            const cycleNext = rightEdge || rbPressed;
+            const cyclePrev = leftEdge || lbPressed;
+            if (cycleNext || cyclePrev) {
+                let idx = inventory.owned.indexOf(inventory.item);
+                if (idx < 0) idx = 0;
+                if (cycleNext) idx = (idx + 1) % inventory.owned.length;
+                else idx = (idx - 1 + inventory.owned.length) % inventory.owned.length;
+                inventory.item = inventory.owned[idx];
+                playSound('loot');
+            }
+        }
+    }
+
+    function renderPause() {
+        const cw = canvas.width, ch = canvas.height;
+        // Yellow paper background fallback
+        ctx.fillStyle = '#f4e9c8';
+        ctx.fillRect(0, 0, cw, ch);
+        // Pause book artwork stretched to fill
+        const bg = images.pause_bg;
+        if (bg && bg.complete) {
+            // Cover the whole canvas while preserving aspect ratio
+            const ratio = Math.max(cw / bg.width, ch / bg.height);
+            const dw = bg.width * ratio;
+            const dh = bg.height * ratio;
+            const bgX = (cw - dw) / 2;
+            const bgY = (ch - dh) / 2;
+            ctx.drawImage(bg, bgX, dy_safe(bgY), dw, dh);
+        }
+        // Draw collected inventory items below the "START" label
+        // The pause art has "START" in the top-left of the left page; the items go
+        // in a row just under it.
+        if (inventory.owned && inventory.owned.length > 0) {
+            // Slot layout: aligned roughly under "START" on the left page.
+            // The art is centered to fit `cw`, so we anchor relative to the centered
+            // background's left edge instead of cw=0.
+            const bgRef = images.pause_bg;
+            let baseX = 60;
+            let baseY = 130;
+            let slotSize = 64;
+            let slotGap = 16;
+            if (bgRef && bgRef.complete) {
+                const ratio = Math.max(cw / bgRef.width, ch / bgRef.height);
+                const dw = bgRef.width * ratio;
+                const dh = bgRef.height * ratio;
+                const bgX = (cw - dw) / 2;
+                const bgY = (ch - dh) / 2;
+                // "START" sits roughly at x≈90/1672, y≈45/941 in the artwork.
+                // The items start a bit below it on the same page.
+                baseX = bgX + 0.05 * dw;
+                baseY = bgY + 0.16 * dh;
+                slotSize = Math.max(48, 0.06 * dw);
+                slotGap = Math.max(12, 0.012 * dw);
+            }
+            // Place each owned item left-to-right
+            for (let i = 0; i < inventory.owned.length; i++) {
+                const itemId = inventory.owned[i];
+                const wi = worldItems.find(w => w.id === itemId);
+                if (!wi) continue;
+                const img = images[wi.sprite];
+                if (!img || !img.complete) continue;
+                const x = baseX + i * (slotSize + slotGap);
+                const y = baseY;
+                // Native sprite ratio preserved
+                const sR = Math.min(slotSize / img.width, slotSize / img.height);
+                const dw2 = img.width * sR;
+                const dh2 = img.height * sR;
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(img, x + (slotSize - dw2) / 2, y + (slotSize - dh2) / 2, dw2, dh2);
+
+                // Draw the selection frame around the currently equipped item.
+                // The frame is a 16x16 sprite scaled up to wrap the slot with a
+                // small outer margin so it visibly surrounds the item.
+                if (itemId === inventory.item) {
+                    const selImg = images.selection;
+                    if (selImg && selImg.complete) {
+                        const pad = Math.max(4, slotSize * 0.1);
+                        const fx = x - pad;
+                        const fy = y - pad;
+                        const fw = slotSize + 2 * pad;
+                        const fh = slotSize + 2 * pad;
+                        ctx.drawImage(selImg, fx, fy, fw, fh);
+                    }
+                }
+            }
+        }
+    }
+    // Tiny helper to avoid sub-pixel jitter when drawing the pause bg.
+    function dy_safe(y) { return Math.round(y); }
+
     function updateVictoire(dt) {
         if (gameState.victoireAnim < 1) {
             gameState.victoireAnim = Math.min(1, gameState.victoireAnim + 1 / 30);
@@ -4782,6 +4951,7 @@ canvas {
             else if (gameState.screen === 'defi') updateDefi(FRAME_TIME);
             else if (gameState.screen === 'victoire') updateVictoire(FRAME_TIME);
             else if (gameState.screen === 'gameover') updateGameover(FRAME_TIME);
+            else if (gameState.screen === 'pause') updatePause(FRAME_TIME);
             else update(FRAME_TIME);
             accumulator -= FRAME_TIME;
         }
@@ -4790,6 +4960,7 @@ canvas {
         else if (gameState.screen === 'defi') renderDefi();
         else if (gameState.screen === 'victoire') renderVictoire();
         else if (gameState.screen === 'gameover') renderGameover();
+        else if (gameState.screen === 'pause') renderPause();
         else render();
         requestAnimationFrame(gameLoop);
     }
