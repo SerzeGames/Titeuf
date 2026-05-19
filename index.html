@@ -1597,6 +1597,8 @@ canvas {
 
     function getInput() {
         pollGamepad();
+        // No input during KO animation — player is on the ground, can't act.
+        if (gameState.koActive) return { dx: 0, dy: 0 };
         let dx = 0, dy = 0;
         // Keyboard
         if (keys['ArrowLeft'] || keys['KeyQ']) dx -= 1;
@@ -1625,6 +1627,7 @@ canvas {
     }
 
     function getRawInput() {
+        if (gameState.koActive) return { dx: 0, dy: 0 };
         let dx = (keys['ArrowLeft'] || keys['KeyQ'] ? -1 : 0) + (keys['ArrowRight'] || keys['KeyD'] ? 1 : 0);
         let dy = (keys['ArrowUp'] || keys['KeyZ'] ? -1 : 0) + (keys['ArrowDown'] || keys['KeyS'] ? 1 : 0);
         // D-pad raw
@@ -1962,8 +1965,9 @@ canvas {
 
         // ===== KO ANIMATION PHASE =====
         // When a player loses his last star, we play an 8-frame KO animation (~1.3s)
-        // in-world, then slide the game-over screen down. During the KO phase, all
-        // input and game logic is frozen except this counter.
+        // in-world, then slide the game-over screen down. During the KO phase, NPCs
+        // and items keep moving normally — only the dying player is frozen with the
+        // KO sprite. (We don't 'return' here so the rest of the simulation runs.)
         if (gameState.koActive) {
             gameState.koTimer++;
             // 10 frames per sprite frame = 6 fps
@@ -1982,9 +1986,13 @@ canvas {
                     gameState.koActive = false;
                     gameState.screen = 'gameover';
                     gameState.gameoverAnim = 0;
+                    return; // screen now changes, skip rest of update
                 }
             }
-            return; // freeze everything else during KO
+            // During KO: lock the player completely. NPCs and items keep simulating.
+            player.moving = false;
+            player.panique = false;
+            // Don't return — let the rest of update() run so NPCs keep moving.
         }
 
         // In kitchen map: ESC / B returns to menu (escape hatch from solo exploration)
@@ -2081,13 +2089,13 @@ canvas {
         }
 
         player.moving = (input.dx !== 0 || input.dy !== 0);
-        // Block movement during vomit lock
-        if (player.vomitActive) player.moving = false;
+        // Block movement during vomit lock OR during KO animation.
+        if (player.vomitActive || gameState.koActive) player.moving = false;
 
         // ===== GAS COLLISION: stepping into Puduk's gas cloud makes Titeuf vomit =====
         // Cooldown so he can't be locked in an endless vomit loop while standing near.
         if (player._gazCooldown > 0) player._gazCooldown--;
-        if (!player.vomitActive && !player.gifleActive && player._gazCooldown === 0) {
+        if (!player.vomitActive && !player.gifleActive && !gameState.koActive && player._gazCooldown === 0) {
             for (const npc of npcs) {
                 if (!npc.hasGaz) continue;
                 // Mirror the gas position logic from the renderer: based on movement direction.
@@ -3146,6 +3154,8 @@ canvas {
             if (item._localPickCooldown > 0) item._localPickCooldown--;
             if (item.picked) continue;
             if (item.pickupCooldown > 0) continue;
+            // Skip pickup detection during KO — Titeuf is on the ground.
+            if (gameState.koActive) continue;
             const dx = player.x - item.x;
             const dy = player.y - item.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
@@ -3181,7 +3191,7 @@ canvas {
                     healthPickup.picked = false;
                 }
             }
-        } else if (healthPickup.pickupCooldown <= 0) {
+        } else if (healthPickup.pickupCooldown <= 0 && !gameState.koActive) {
             const hdx = player.x - healthPickup.x;
             const hdy = player.y - healthPickup.y;
             const hdist = Math.sqrt(hdx * hdx + hdy * hdy);
@@ -4722,16 +4732,36 @@ canvas {
         // Reset health pickup
         healthPickup.picked = false;
         healthPickup.respawnTimer = 0;
-        // Reset NPCs
+        // Reset NPCs to a clean state — important when restarting after a game-over,
+        // otherwise leftover angry-mode speed / chase flags would carry over.
         for (const npc of npcs) {
             if (!npc.patrol) continue;
             npc.state = 'idle';
             npc.patrolIndex = 0;
             npc.waitTimer = 180;
             npc.vigilance = 'calm';
+            if (gameState.mode === 'multi') {
+                npc.vigilanceLocal = 'calm';
+                npc.vigilanceRemote = 'calm';
+            }
             npc.angrySpeedTimer = 0;
             npc.path = null;
+            npc.pathIndex = 0;
+            npc.pathRecalcTimer = 0;
             npc.comboCount = 0;
+            // Reset speed back to baseline (was multiplied during chase / angry walks).
+            npc.speed = npc.baseSpeed;
+            // Reset all chase-state flags so a fresh game starts clean.
+            npc.angryAt = null;
+            npc.chaseTarget = null;
+            npc._giveUpChase = false;
+            npc._invincibleTag = null;
+            npc.slideLife = 0;
+            npc.tombeTimer = 0;
+            npc.vomitTimer = 0;
+            npc._gazCooldown = 0;
+            npc.frame = 0;
+            npc.animTimer = 0;
             npc.x = npc.patrol[0].x;
             npc.y = npc.patrol[0].y;
         }
