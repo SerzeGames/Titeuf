@@ -4075,7 +4075,10 @@ canvas {
             const screenY = (npc.y - camY + viewH / 2) * zoom;
 
             const margin = 20;
-            const hudBottom = ch - 80 - 20; // above HUD bar
+            // Dot is rendered at 128x64, centered on clampY. So the bottom edge is
+            // clampY + 32. The HUD bar starts at ch - 80, so we need
+            // clampY + 32 <= ch - 80 - 4 (small visual padding) => clampY <= ch - 116.
+            const hudBottom = ch - 80 - 4 - 32;
             const isOffScreen = screenX < -margin || screenX > cw + margin ||
                                 screenY < -margin || screenY > hudBottom + margin;
 
