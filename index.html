@@ -462,6 +462,12 @@ canvas {
         koFrame: 0,             // 0..7 (8 frames of titeuf_ko.png)
         koTimer: 0,             // frame counter for the 6 fps KO anim
         gameoverAnim: 0,        // 0->1 slide-down progress for gameover.png
+        // Dialogue box (kitchen intro: someone hands Titeuf the dynamite)
+        dialogActive: false,    // true while the dialog is visible — game is frozen but music keeps playing
+        dialogAnim: 0,          // 0..1 slide-up progress (1 = fully visible at bottom)
+        dialogPhase: 'in',      // 'in' (rising), 'wait' (waiting for A presses), 'out' (dropping)
+        dialogLocalConfirmed: false, // local A pressed (multi: still wait for peer)
+        dialogRemoteConfirmed: false,// peer's A press (multi only)
     };
 
     // ========== MULTIPLAYER (PeerJS) ==========
@@ -660,6 +666,23 @@ canvas {
                 entry.respawnTimer = -1;
             }
             startGlisseSound();
+        } else if (msg.type === 'request_bomb') {
+            // Joiner posed a dynamite; the host spawns the authoritative bomb.
+            if (!net.isHost) return;
+            bombs.push({
+                id: ++bombIdCounter,
+                x: msg.x, y: msg.y,
+                fuse: 180,
+                exploded: false,
+                explFrame: 0,
+                explTimer: 0,
+                droppedBy: 'remote',
+            });
+        } else if (msg.type === 'request_bomb_pickup') {
+            // Joiner picked a bomb back up; remove it from the host's authoritative list.
+            if (!net.isHost) return;
+            const idx = bombs.findIndex(b => b.id === msg.id && !b.exploded);
+            if (idx >= 0) bombs.splice(idx, 1);
         } else if (msg.type === 'request_pickup') {
             // Joiner asks host to mark an item as picked up (for sync).
             if (!net.isHost) return;
@@ -723,6 +746,7 @@ canvas {
                 size: msg.size || 38,
                 sliding: true,
                 ghost: true,
+                isBomb: !!msg.isBomb,
             });
         } else if (msg.type === 'score_event') {
             // Host -> joiner: you scored, add the points + show popup over yourself.
@@ -759,6 +783,10 @@ canvas {
             if (gameState.screen === 'victoire' || gameState.screen === 'game') {
                 startCuisine(false); // don't broadcast again, we received the request
             }
+        } else if (msg.type === 'dialog_confirm') {
+            // Peer pressed A on the kitchen intro dialog. Mark them as confirmed; the
+            // dialog dismisses when both sides have confirmed.
+            gameState.dialogRemoteConfirmed = true;
         } else if (msg.type === 'goto_menu_from_cuisine') {
             // Other player went back to menu — we follow.
             currentMap = 'classe';
@@ -842,6 +870,15 @@ canvas {
             health: {
                 picked: healthPickup.picked,
             },
+            // Active bombs (dynamites) so the joiner sees them ticking and exploding.
+            bombs: bombs.map(b => ({
+                id: b.id,
+                x: Math.round(b.x * 10) / 10,
+                y: Math.round(b.y * 10) / 10,
+                fuse: b.fuse,
+                exploded: b.exploded,
+                explFrame: b.explFrame,
+            })),
         });
     }
     let netWorldTickCounter = 0;
@@ -946,6 +983,38 @@ canvas {
             } else {
                 healthPickup.picked = msg.health.picked;
             }
+        }
+        // Bombs: replace the local bombs list with the host's view. We preserve the
+        // explTimer (animation timing) on existing bombs and add any new ones.
+        if (Array.isArray(msg.bombs)) {
+            const newList = [];
+            for (const incoming of msg.bombs) {
+                const existing = bombs.find(b => b.id === incoming.id);
+                if (existing) {
+                    existing.x = incoming.x;
+                    existing.y = incoming.y;
+                    existing.fuse = incoming.fuse;
+                    if (!existing.exploded && incoming.exploded) {
+                        // Just exploded on host's side — start anim locally too
+                        existing.exploded = true;
+                        existing.explTimer = 0;
+                        existing.explFrame = incoming.explFrame || 0;
+                    }
+                    newList.push(existing);
+                } else {
+                    newList.push({
+                        id: incoming.id,
+                        x: incoming.x, y: incoming.y,
+                        fuse: incoming.fuse,
+                        exploded: incoming.exploded,
+                        explFrame: incoming.explFrame || 0,
+                        explTimer: 0,
+                        droppedBy: 'remote',
+                    });
+                }
+            }
+            bombs.length = 0;
+            for (const b of newList) bombs.push(b);
         }
     }
 
@@ -1061,7 +1130,19 @@ canvas {
           spawnX: 720, spawnY: 270, respawnTimer: 0 },
         { id: 'bille', sprite: 'item_bille', x: 50, y: 480, size: 38, picked: false,
           spawnX: 50, spawnY: 480, respawnTimer: 0 },
+        // Dynamite is a special, consumable item: 3 charges given at game start.
+        // It doesn't sit on the floor like the others — it lives in the inventory
+        // immediately. Using it spawns a 'bomb' that ticks down and explodes.
+        // `picked: true` keeps the world-render code from drawing it on the floor.
+        { id: 'dynamite', sprite: 'item_dynamite', x: -100, y: -100, size: 32,
+          picked: true, isDynamite: true, charges: 3,
+          spawnX: -100, spawnY: -100, respawnTimer: 0 },
     ];
+
+    // Active bombs (dynamites posées au sol qui comptent à rebours puis explosent).
+    // Each: { id, x, y, fuse (frames), exploded, explFrame, explTimer, droppedBy }
+    const bombs = [];
+    let bombIdCounter = 0;
 
     // Helper: respawn all items at their position for the given map.
     function respawnItemsForMap(mapName) {
@@ -1210,6 +1291,7 @@ canvas {
                 poursuit_diag_bas: 'francois_poursuit_diag_bas',
                 gifle: 'francois_gifle',
                 vomit: 'francois_vomit',
+                explose: 'francois_explose',
             },
             currentSprite: 'francois_idle',
             // Francois idle: 4 frames (256x64); walk: 6 frames (256x128); others: 4 frames
@@ -1408,6 +1490,12 @@ canvas {
                 gameover_bg: 'images/gameover.png',
                 pause_bg: 'images/pause.png',
                 selection: 'images/selection.png',
+                item_dynamite: 'images/dynamite.png',
+                count_3: 'images/3s.png',
+                count_2: 'images/2s.png',
+                count_1: 'images/1s.png',
+                explosion: 'images/explosion.png',
+                dialogue: 'images/dialogue.png',
                 titeuf_ko: 'images/ko.png',
                 map_cuisine: 'images/cuisine.png',
                 // Francois sprites (kitchen NPC)
@@ -1432,6 +1520,7 @@ canvas {
                 francois_poursuit_diag_bas: 'images/francois_poursuit_diag_bas.png',
                 francois_gifle: 'images/francois_gifle.png',
                 francois_vomit: 'images/francois_vomis.png',
+                francois_explose: 'images/francois_explosion.png',
                 // Puduk: 2nd kitchen NPC. Only movement sprites for now; other states
                 // fall back to the same images (no glisse/tombe/poursuit/gifle yet).
                 puduk_idle: 'images/puduk_idle.png',
@@ -1480,6 +1569,7 @@ canvas {
             ko: 'son/ko.mp3',
             gameover: 'son/gameover.mp3',
             pause: 'son/pause.mp3',
+            explosion: 'son/explosion.mp3',
         };
         for (const [key, src] of Object.entries(sources)) {
             const a = new Audio();
@@ -1882,10 +1972,13 @@ canvas {
         respawnItemsForMap(mapName);
         // Clear any thrown items left over from the previous map
         thrownItems.length = 0;
-        // Clear inventory (Titeuf drops what he was carrying when switching maps)
+        // Clear inventory (Titeuf drops what he was carrying when switching maps).
+        // Dynamite is given only by startCuisine() — NOT here, since this function
+        // is also called by various menu / game-over flows.
         inventory.item = null;
         inventory.owned = [];
         inventory.showAnimActive = false;
+        bombs.length = 0;
         // Replace the contents of npcs in place (keeps the same array reference,
         // which other code may hold onto).
         npcs.length = 0;
@@ -1932,6 +2025,21 @@ canvas {
         if (broadcast === undefined) broadcast = true;
         currentMap = 'cuisine';
         setActiveNpcForMap('cuisine');
+        // ===== KITCHEN-ONLY: give 3 fresh dynamites to the player =====
+        // Done AFTER setActiveNpcForMap (which clears the inventory), so they survive.
+        // We force the dynamite to be the currently equipped item AND trigger the
+        // inventory HUD slide-up so it's visibly held in the bottom-right corner.
+        for (const it of worldItems) {
+            if (it.isDynamite) {
+                it.charges = 3;
+                it.picked = true;
+                if (!inventory.owned.includes(it.id)) inventory.owned.push(it.id);
+                inventory.item = it.id; // always force dynamite as the equipped item
+            }
+        }
+        // Trigger the slide-up anim so the dynamite icon appears in the HUD.
+        inventory.showAnim = 0;
+        inventory.showAnimActive = true;
         // Spawn positions: host on the left, joiner on the right (multi);
         // solo just spawns in the middle.
         if (gameState.mode === 'multi') {
@@ -1964,6 +2072,14 @@ canvas {
         gameState.screen = 'game';
         // Restart background music (will pick cuisine.mp3 now that currentMap='cuisine')
         restartMusicFromStart();
+        // ===== INTRO DIALOG =====
+        // A friend hands Titeuf the dynamite. The world is frozen until the dialog
+        // is dismissed (A pressed by all players in multi). Music keeps playing.
+        gameState.dialogActive = true;
+        gameState.dialogAnim = 0;
+        gameState.dialogPhase = 'in';
+        gameState.dialogLocalConfirmed = false;
+        gameState.dialogRemoteConfirmed = false;
         // Tell the other player to follow us, if we triggered the move
         if (broadcast && gameState.mode === 'multi' && net.conn && net.conn.open) {
             netSend({ type: 'goto_cuisine' });
@@ -1973,6 +2089,47 @@ canvas {
     function update(dt) {
         const input = getInput();
         const raw = getRawInput();
+
+        // ===== DIALOG BOX (kitchen intro) =====
+        // Freezes the world (player + NPCs + items) while it's visible. Music keeps
+        // playing. In multi, BOTH players must press A to dismiss.
+        if (gameState.dialogActive) {
+            // Animate slide-up / slide-down
+            if (gameState.dialogPhase === 'in') {
+                gameState.dialogAnim = Math.min(1, gameState.dialogAnim + 1 / 30);
+                if (gameState.dialogAnim >= 1) {
+                    gameState.dialogPhase = 'wait';
+                }
+            } else if (gameState.dialogPhase === 'wait') {
+                // Detect A press (edge) — keyboard 'KeyA' or gamepad A button.
+                const aPressed = (keys['KeyA'] && !keys['_prevDialogA'])
+                              || (gamepad.a && !gamepad.aPrev);
+                keys['_prevDialogA'] = keys['KeyA'];
+                if (aPressed && !gameState.dialogLocalConfirmed) {
+                    gameState.dialogLocalConfirmed = true;
+                    // Notify the peer in multi
+                    if (gameState.mode === 'multi' && net.conn && net.conn.open) {
+                        netSend({ type: 'dialog_confirm' });
+                    }
+                }
+                // Solo: leave wait immediately on local confirm.
+                // Multi: leave only when BOTH players confirmed.
+                const allConfirmed = gameState.mode === 'multi'
+                    ? (gameState.dialogLocalConfirmed && gameState.dialogRemoteConfirmed)
+                    : gameState.dialogLocalConfirmed;
+                if (allConfirmed) {
+                    gameState.dialogPhase = 'out';
+                }
+            } else if (gameState.dialogPhase === 'out') {
+                gameState.dialogAnim = Math.max(0, gameState.dialogAnim - 1 / 30);
+                if (gameState.dialogAnim <= 0) {
+                    gameState.dialogActive = false;
+                }
+            }
+            // Block all game logic while the dialog is up (but don't return on the
+            // very last frame so the world can resume immediately next tick).
+            return;
+        }
 
         // ===== PAUSE: press Select / Tab to open the inventory pause screen =====
         // Disabled during KO/gameover/victoire (those screens have their own input).
@@ -2033,24 +2190,11 @@ canvas {
             // Don't return — let the rest of update() run so NPCs keep moving.
         }
 
-        // In kitchen map: ESC / B returns to menu (escape hatch from solo exploration)
-        if (currentMap === 'cuisine') {
-            const bPressed = (keys['Escape'] && !keys['_prevEsc']) || (gamepad.b && !gamepad.bPrev);
-            keys['_prevEsc'] = keys['Escape'];
-            if (bPressed) {
-                // In multi: tell the other player we're leaving, then disconnect cleanly
-                if (gameState.mode === 'multi' && net.conn && net.conn.open) {
-                    try { netSend({ type: 'goto_menu_from_cuisine' }); } catch (_) {}
-                    cleanupNet();
-                }
-                currentMap = 'classe';
-                setActiveNpcForMap('classe');
-                remotePlayer.active = false;
-                gameState.screen = 'menu';
-                restartMusicFromStart();
-                return;
-            }
-        }
+        // (Previously: pressing B / Escape in the kitchen sent you back to the menu.
+        // Removed because it conflicted with normal in-game B usage — for example,
+        // the B button is not used for any in-game action right now, but accidentally
+        // pressing it shouldn't kick the player back to the main menu mid-game.
+        // The way out of the kitchen is now via the pause menu or game over.)
 
         // ===== EXIT DOOR: detect when player reaches the door with score >= 8 =====
         // The door is the top-left wardrobe collider { x:36, y:55, w:78, h:40 }.
@@ -2299,7 +2443,7 @@ canvas {
                         // Stop on last filled tombe frame (varies by NPC).
                         const tombeFrames = npc.tombeFrames || 6;
                         if (npc.frame < tombeFrames - 1) npc.frame++;
-                    } else if (npc.state === 'gifle' || npc.state === 'idle' || npc.state === 'vomit') {
+                    } else if (npc.state === 'gifle' || npc.state === 'idle' || npc.state === 'vomit' || npc.state === 'explose') {
                         if (npc.frame < maxF - 1) npc.frame++;
                     } else {
                         npc.frame = (npc.frame + 1) % maxF;
@@ -2914,6 +3058,30 @@ canvas {
                     // upgrade to 'poursuit' if a player is visible).
                     resumePatrol(true);
                 }
+            } else if (npc.state === 'explose') {
+                // NPC was caught in a dynamite blast. Plays the 'explose' sprite
+                // 4-frame animation in place (no movement, stunned). When it
+                // finishes, the NPC becomes red-angry against whoever threw the
+                // bomb and resumes patrol (will upgrade to chase if it sees them).
+                if (npc.sprites.explose) {
+                    npc.currentSprite = npc.sprites.explose;
+                } else {
+                    // Fallback for NPCs without a dedicated explose sprite
+                    npc.currentSprite = npc.sprites.tombe || npc.sprites.idle;
+                }
+                npc.totalFrames = 4; npc.fps = 6;
+                // Stay put — slideDx/Dy zeroed in case it was sliding before.
+                npc.slideDx = 0; npc.slideDy = 0;
+                if (npc.frame >= npc.totalFrames - 1) {
+                    // Become red-angry against the bomber (tracked at explosion time
+                    // via npc._explodeBy). Same flow as a successful slip-trap angry.
+                    npc.angrySpeedTimer = 420;
+                    npc.angryAt = npc._explodeBy || null;
+                    npc._explodeBy = null;
+                    npc._giveUpChase = false; // ensure he can chase again
+                    applyAngryVigilance(npc);
+                    resumePatrol(true);
+                }
             } else if (npc.state === 'idle') {
                 const target = npc.patrol[npc.patrolIndex];
                 npc.currentSprite = npc.sprites.idle;
@@ -3037,7 +3205,7 @@ canvas {
                     if (npc.frame < tombeFrames - 1) {
                         npc.frame++;
                     }
-                } else if (npc.state === 'gifle' || npc.state === 'idle' || npc.state === 'vomit') {
+                } else if (npc.state === 'gifle' || npc.state === 'idle' || npc.state === 'vomit' || npc.state === 'explose') {
                     // Play once, stop on last frame
                     if (npc.frame < npc.totalFrames - 1) {
                         npc.frame++;
@@ -3152,6 +3320,126 @@ canvas {
         }
         } // end if !skipNpcSim (slipping)
 
+        // ========== BOMBS (DYNAMITE) ==========
+        // Each bomb ticks down its 3s fuse, then explodes: plays the explosion sprite
+        // sheet over a short window, plays the sound, and deals 1 HP to any player
+        // standing in the blast radius. Joiner skips the simulation: it just animates
+        // the explosion locally based on the host's world_state.
+        const isJoinerMulti = (gameState.mode === 'multi' && !net.isHost);
+        for (let bi = bombs.length - 1; bi >= 0; bi--) {
+            const b = bombs[bi];
+            if (!b.exploded) {
+                // Solo & host: tick the fuse and trigger explosion authoritatively.
+                // Joiner: do nothing; fuse value comes from world_state.
+                if (!isJoinerMulti) {
+                    b.fuse--;
+                    if (b.fuse <= 0) {
+                        b.exploded = true;
+                        b.explFrame = 0;
+                        b.explTimer = 0;
+                        broadcastSound('explosion');
+                        // Blast radius: matches the visual explosion footprint (~140px wide
+                        // sprite). Bigger than the original 70 so dodging requires real
+                        // distance, not just stepping back one tile.
+                        const BLAST = 110;
+                        // Local player damage (host or solo, never joiner)
+                        if (!player.gifleActive && !player.vomitActive && (player.headBlink || 0) === 0) {
+                            const dx = player.x - b.x;
+                            const dy = player.y - b.y;
+                            if (dx * dx + dy * dy < BLAST * BLAST) {
+                                player.gifleActive = true;
+                                player.gifleTimer = 48;
+                                player.health = Math.max(0, player.health - 1);
+                                player.headBlink = 180;
+                                player.frame = 0; player.animTimer = 0;
+                                // Slap sound when hit by the blast (matches the gifle animation).
+                                broadcastSound('gifle');
+                                if (player.health <= 0) {
+                                    triggerGameOver(true);
+                                }
+                            }
+                        }
+                        // Remote player damage (host only, via gifle_remote)
+                        if (gameState.mode === 'multi' && net.isHost && remotePlayer.active
+                            && (remotePlayer.headBlink || 0) === 0) {
+                            const dx = remotePlayer.x - b.x;
+                            const dy = remotePlayer.y - b.y;
+                            if (dx * dx + dy * dy < BLAST * BLAST) {
+                                netSend({ type: 'world_event', event: 'gifle_remote' });
+                            }
+                        }
+                        // ===== NPC STUN BY EXPLOSION =====
+                        // Any active NPC inside the blast radius enters the 'explose'
+                        // state: stunned in place, plays its explose animation, then
+                        // turns red-angry against the bomber. Each stunned NPC awards
+                        // the bomber +14 points (doubled per extra NPC hit in the
+                        // same blast — for later combos).
+                        // NOTE: dynamite takes priority over 'tombe' and 'gifle' so a
+                        // bomb landing next to a downed NPC doesn't "waste" itself —
+                        // the NPC is interrupted from his fall/slap and gets stunned
+                        // by the blast like any other NPC.
+                        let npcsHit = 0;
+                        for (const npc of npcs) {
+                            if (!npc.vigilanceRadius) continue;          // skip passive (Puduk)
+                            if (npc.state === 'explose') continue;        // already stunned
+                            const dx = npc.x - b.x;
+                            const dy = npc.y - b.y;
+                            if (dx * dx + dy * dy >= BLAST * BLAST) continue;
+                            // Enter stun (overrides 'tombe' / 'gifle' / 'glisse' / 'walking' / 'poursuit' etc.)
+                            npc.state = 'explose';
+                            npc.frame = 0; npc.animTimer = 0; npc.fps = 6;
+                            npc.slideDx = 0; npc.slideDy = 0;
+                            npc.slideLife = 0;
+                            npc.tombeTimer = 0;     // cancel any falling timer
+                            npc.gifleTimer = 0;     // cancel any slap timer
+                            // Remember the bomber so post-stun anger targets them
+                            npc._explodeBy = b.droppedBy || 'local';
+                            // Slap sound for the NPC hit
+                            broadcastSound('gifle');
+                            npcsHit++;
+                        }
+                        // Score: +14 per NPC hit. Combo doubling (for later) would
+                        // apply when npcsHit > 1. For now we just give a flat 14 per.
+                        if (npcsHit > 0) {
+                            const pts = 14 * npcsHit;
+                            if (gameState.mode === 'multi') {
+                                // Award to whoever placed the bomb
+                                if (b.droppedBy === 'remote') {
+                                    // The joiner threw the bomb: tell them to add points
+                                    // and show a popup over their (remote) Titeuf locally.
+                                    netSend({ type: 'score_event', pts: pts });
+                                    remotePlayer.scorePopup = { text: '+' + pts, timer: 180 };
+                                } else {
+                                    // Host scored — popup over our own Titeuf.
+                                    player.score += pts;
+                                    player.scorePopup = { text: '+' + pts, timer: 180 };
+                                    // Tell the joiner to display a popup over our Titeuf too.
+                                    netSend({ type: 'remote_score_popup', pts: pts });
+                                }
+                            } else {
+                                // Solo: always the local player
+                                player.score += pts;
+                                player.scorePopup = { text: '+' + pts, timer: 180 };
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Playing explosion animation: 3 frames @ 6 fps (~10 frames each).
+                // Runs on both host AND joiner so they see the explosion smoothly.
+                b.explTimer++;
+                if (b.explTimer >= 10) {
+                    b.explTimer = 0;
+                    b.explFrame++;
+                    if (b.explFrame >= 3) {
+                        // Animation done — remove bomb (host authoritative; joiner's
+                        // splice is harmless because next world_state confirms removal).
+                        bombs.splice(bi, 1);
+                    }
+                }
+            }
+        }
+
         // ========== WORLD ITEM RESPAWN ==========
         // Items that hit a NPC (thrown or trap) reappear at their spawn point
         // once no NPC is in glisse/tombe state anymore.
@@ -3211,6 +3499,45 @@ canvas {
                 if (gameState.mode === 'multi' && !net.isHost) {
                     item._localPickCooldown = 60; // 1s guard against stale world_state
                     netSend({ type: 'request_pickup', itemId: item.id });
+                }
+            }
+        }
+
+        // ===== BOMB PICKUP =====
+        // Active (non-exploded) bombs can be picked up after a 1s "throw cooldown"
+        // — same as the regular item drop cooldown. Picking it up gives back one
+        // charge of dynamite and removes the bomb (its fuse is cancelled).
+        // KO and very early fuse (just thrown) are excluded so the thrower can't
+        // instantly re-grab his own bomb.
+        if (!gameState.koActive) {
+            for (let bi = bombs.length - 1; bi >= 0; bi--) {
+                const b = bombs[bi];
+                if (b.exploded) continue;
+                // Use a 1-second pickup cooldown after the bomb was placed.
+                // fuse starts at 180; we treat the first 60 frames as the cooldown.
+                if (b.fuse > 120) continue; // wait 1s before re-pickable
+                const dx = player.x - b.x;
+                const dy = player.y - b.y;
+                if (dx * dx + dy * dy < 45 * 45) {
+                    // Give back one charge of dynamite
+                    const dyn = worldItems.find(w => w.isDynamite);
+                    if (dyn) {
+                        dyn.charges++;
+                        if (!inventory.owned.includes(dyn.id)) inventory.owned.push(dyn.id);
+                        inventory.item = dyn.id;
+                        inventory.showAnim = 0;
+                        inventory.showAnimActive = true;
+                    }
+                    broadcastSound('loot');
+                    // Multi: only host removes the bomb authoritatively. Joiner asks.
+                    if (gameState.mode === 'multi' && !net.isHost) {
+                        netSend({ type: 'request_bomb_pickup', id: b.id });
+                        // Locally hide it for snappy feedback; world_state will confirm.
+                        bombs.splice(bi, 1);
+                    } else {
+                        bombs.splice(bi, 1);
+                    }
+                    break;
                 }
             }
         }
@@ -3277,6 +3604,77 @@ canvas {
         keys['_prevA'] = keys['KeyA'];
 
         if (aPressed && inventory.item) {
+            // ===== DYNAMITE: lancée comme un projectile glissant comme les autres items.
+            // À la fin du slide (ou collision mur), on convertit en bomb avec son fuse.
+            const inv_item = worldItems.find(w => w.id === inventory.item);
+            if (inv_item && inv_item.isDynamite) {
+                // Same throw direction logic as the regular throw block below.
+                let throwDx = 0, throwDy = 0;
+                const ld = player.lastDirection;
+                if (ld === 'down') { throwDy = 1; }
+                else if (ld === 'up') { throwDy = -1; }
+                else if (ld === 'diag_haut') {
+                    throwDx = player.facingLeft ? -1 : 1;
+                    throwDy = -1;
+                } else if (ld === 'diag_bas') {
+                    throwDx = player.facingLeft ? -1 : 1;
+                    throwDy = 1;
+                } else {
+                    throwDx = player.facingLeft ? -1 : 1;
+                }
+                if (throwDx !== 0 && throwDy !== 0) {
+                    const inv = 1 / Math.SQRT2;
+                    throwDx *= inv; throwDy *= inv;
+                }
+                let spawnX = player.x + throwDx * 20;
+                let spawnY = player.y + throwDy * 20;
+                const spawnHb = { x: spawnX - 12, y: spawnY - 6, w: 24, h: 12 };
+                let spawnBlocked = false;
+                for (const c of getCurrentColliders()) {
+                    if (rectsOverlap(spawnHb, c)) { spawnBlocked = true; break; }
+                }
+                if (spawnBlocked) { spawnX = player.x; spawnY = player.y; }
+
+                thrownItems.push({
+                    id: 'dynamite',
+                    sprite: inv_item.sprite,
+                    x: spawnX, y: spawnY,
+                    dx: throwDx * 9, dy: throwDy * 9,
+                    life: 55,
+                    size: 32,
+                    sliding: true,
+                    thrownBy: 'local',
+                    // Marks this projectile as a dynamite — when it stops (mur ou life=0),
+                    // we convert it to a bomb at its final position instead of dropping
+                    // a trap on the floor (handled in the thrownItems update block).
+                    isBomb: true,
+                });
+                if (gameState.mode === 'multi' && net.conn && net.conn.open) {
+                    netSend({
+                        type: 'item_throw',
+                        id: 'dynamite',
+                        sprite: inv_item.sprite,
+                        x: spawnX, y: spawnY,
+                        dx: throwDx * 9, dy: throwDy * 9,
+                        size: 32,
+                        life: 55,
+                        isBomb: true,
+                    });
+                }
+
+                // Consume one charge
+                inv_item.charges--;
+                if (inv_item.charges <= 0) {
+                    const idx = inventory.owned.indexOf(inv_item.id);
+                    if (idx >= 0) inventory.owned.splice(idx, 1);
+                    inventory.item = inventory.owned.length > 0 ? inventory.owned[0] : null;
+                }
+                inventory.showAnim = 0;
+                inventory.showAnimActive = inventory.item !== null;
+                playSound('drop');
+                return;
+            }
+
             // In panique mode: drop the item as a trap on the floor instead of throwing.
             // Any NPC walking onto it will slide.
             if (player.panique) {
@@ -3475,6 +3873,11 @@ canvas {
                             if (!npc.vigilanceRadius) continue;
                             // Allow hits while sliding (to extend combo) but not while falling/slapping
                             if (npc.state === 'tombe' || npc.state === 'gifle') continue;
+                            // DYNAMITE: doesn't make NPCs slip on impact. The bomb just
+                            // passes through the NPC and keeps sliding to its landing
+                            // spot, where it will explode normally. (NPC stun on blast
+                            // will be added later.)
+                            if (t.isBomb) continue;
                             const npcHb = { x: npc.x - 20, y: npc.y - 20, w: 40, h: 30 };
                             if (rectsOverlap(itemHb, npcHb)) {
                                 // In multi as joiner: ask the host to apply the hit; remove projectile locally
@@ -3543,6 +3946,24 @@ canvas {
                         t.y -= Math.sign(t.dy) * pushBack;
                     }
                     t.sliding = false;
+                    // Dynamite landed (wall hit) → spawn a bomb at this position.
+                    if (t.isBomb) {
+                        if (gameState.mode === 'multi' && !net.isHost && net.conn && net.conn.open) {
+                            netSend({ type: 'request_bomb', x: t.x, y: t.y });
+                        } else {
+                            bombs.push({
+                                id: ++bombIdCounter,
+                                x: t.x, y: t.y,
+                                fuse: 180,
+                                exploded: false,
+                                explFrame: 0,
+                                explTimer: 0,
+                                droppedBy: t.thrownBy || 'local',
+                            });
+                        }
+                        thrownItems.splice(i, 1);
+                        continue;
+                    }
                     const entry = worldItems.find(w => w.id === t.id);
                     if (entry) {
                         entry.x = t.x; entry.y = t.y;
@@ -3577,6 +3998,24 @@ canvas {
                 t.dy *= 0.94;
                 if (t.life <= 0) {
                     t.sliding = false;
+                    // Dynamite expired in flight → spawn a bomb at this position.
+                    if (t.isBomb) {
+                        if (gameState.mode === 'multi' && !net.isHost && net.conn && net.conn.open) {
+                            netSend({ type: 'request_bomb', x: t.x, y: t.y });
+                        } else {
+                            bombs.push({
+                                id: ++bombIdCounter,
+                                x: t.x, y: t.y,
+                                fuse: 180,
+                                exploded: false,
+                                explFrame: 0,
+                                explTimer: 0,
+                                droppedBy: t.thrownBy || 'local',
+                            });
+                        }
+                        thrownItems.splice(i, 1);
+                        continue;
+                    }
                     const entry = worldItems.find(w => w.id === t.id);
                     if (entry) {
                         entry.x = t.x; entry.y = t.y;
@@ -3699,6 +4138,16 @@ canvas {
                 y: npc.y,
                 x: npc.x,
                 npc: npc,
+            });
+        }
+
+        // Bombs (dynamites posées au sol, en train d'attendre l'explosion ou exploser)
+        for (const b of bombs) {
+            entities.push({
+                type: 'bomb',
+                y: b.y,
+                x: b.x,
+                bomb: b,
             });
         }
 
@@ -3977,6 +4426,51 @@ canvas {
                     ent.y - renderH / 2 - 4,  // slightly above ground
                     renderW, renderH
                 );
+            } else if (ent.type === 'bomb') {
+                const b = ent.bomb;
+                ctx.imageSmoothingEnabled = false;
+                if (!b.exploded) {
+                    // Draw the dynamite sprite (16x16) at ~3x scale
+                    const dynImg = images.item_dynamite;
+                    const RW = 32, RH = 32;
+                    if (dynImg && dynImg.complete) {
+                        ctx.drawImage(dynImg, ent.x - RW / 2, ent.y - RH, RW, RH);
+                    }
+                    // Countdown number above the dynamite. Choose 3 / 2 / 1 based on fuse.
+                    let countImg = null;
+                    if (b.fuse > 120) countImg = images.count_3;
+                    else if (b.fuse > 60) countImg = images.count_2;
+                    else countImg = images.count_1;
+                    if (countImg && countImg.complete) {
+                        const CW = 16, CH = 16; // 8x8 source rendered at 16x16
+                        ctx.drawImage(countImg, ent.x - CW / 2, ent.y - RH - CH - 2, CW, CH);
+                    }
+                } else {
+                    // Explosion: 3 frames in a sprite sheet. The sheet is 3568x765
+                    // but the actual frames occupy only the first ~2760 pixels
+                    // (each frame is ~920 px wide; the right side is empty black).
+                    // So we use a hardcoded frame width instead of dividing by 3.
+                    const expImg = images.explosion;
+                    if (expImg && expImg.complete) {
+                        const totalH = expImg.naturalHeight || 765;
+                        const frameW = 920; // measured from the source sheet
+                        const sx = b.explFrame * frameW;
+                        const RW = 140, RH = 140;
+                        // 'screen' blend cancels the pure black background of the sheet
+                        // so the explosion appears on transparent ground without
+                        // needing a pre-keyed PNG.
+                        const prevOp = ctx.globalCompositeOperation;
+                        ctx.globalCompositeOperation = 'screen';
+                        ctx.drawImage(
+                            expImg,
+                            sx, 0, frameW, totalH,
+                            ent.x - RW / 2,
+                            ent.y - RH / 2,
+                            RW, RH
+                        );
+                        ctx.globalCompositeOperation = prevOp;
+                    }
+                }
             }
         }
 
@@ -4218,6 +4712,31 @@ canvas {
                 btnFrame * srcW, 0, srcW, srcH,
                 btnX, btnY, renderW, renderH
             );
+        }
+
+        // ===== DIALOG BOX (kitchen intro) =====
+        // Drawn last so it sits on top of everything (HUD, players, items).
+        if (gameState.dialogActive) {
+            const dImg = images.dialogue;
+            if (dImg && dImg.complete) {
+                const cw = canvas.width, ch = canvas.height;
+                // The sprite is 256x256 but the useful artwork (bust + yellow text
+                // box) sits in a 240x80 region anchored at (0, 80). Anything outside
+                // that rect is just black filler, so we crop it out explicitly.
+                const srcX = 0, srcY = 80, srcW = 240, srcH = 80;
+                // Stretch horizontally to fill the whole screen width. Make it tall
+                // enough that the text/bust isn't squashed: ~55% of the canvas height
+                // (capped at 460 px on very tall screens).
+                const dw = cw;
+                const dh = Math.min(ch * 0.55, 460);
+                // Slide-up easing: 0 = entirely below screen, 1 = resting position.
+                const ease = 1 - Math.pow(1 - gameState.dialogAnim, 3);
+                const finalY = ch - dh; // flush to the bottom edge
+                const startY = ch;
+                const dy = startY + (finalY - startY) * ease;
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(dImg, srcX, srcY, srcW, srcH, 0, dy, dw, dh);
+            }
         }
     }
 
@@ -4673,26 +5192,36 @@ canvas {
                 slotSize = Math.max(48, 0.06 * dw);
                 slotGap = Math.max(12, 0.012 * dw);
             }
-            // Place each owned item left-to-right
-            for (let i = 0; i < inventory.owned.length; i++) {
-                const itemId = inventory.owned[i];
+            // Build the visible slot list. Consumable items like dynamite are shown
+            // as ONE slot per remaining charge (so 3 dynamites = 3 dynamite icons).
+            const slots = [];
+            for (const itemId of inventory.owned) {
                 const wi = worldItems.find(w => w.id === itemId);
                 if (!wi) continue;
-                const img = images[wi.sprite];
+                if (wi.isDynamite && wi.charges > 0) {
+                    for (let k = 0; k < wi.charges; k++) {
+                        slots.push({ itemId, sprite: wi.sprite, isFirst: k === 0 });
+                    }
+                } else {
+                    slots.push({ itemId, sprite: wi.sprite, isFirst: true });
+                }
+            }
+            // Place each slot left-to-right
+            for (let i = 0; i < slots.length; i++) {
+                const slot = slots[i];
+                const img = images[slot.sprite];
                 if (!img || !img.complete) continue;
                 const x = baseX + i * (slotSize + slotGap);
                 const y = baseY;
-                // Native sprite ratio preserved
                 const sR = Math.min(slotSize / img.width, slotSize / img.height);
                 const dw2 = img.width * sR;
                 const dh2 = img.height * sR;
                 ctx.imageSmoothingEnabled = false;
                 ctx.drawImage(img, x + (slotSize - dw2) / 2, y + (slotSize - dh2) / 2, dw2, dh2);
 
-                // Draw the selection frame around the currently equipped item.
-                // The frame is a 16x16 sprite scaled up to wrap the slot with a
-                // small outer margin so it visibly surrounds the item.
-                if (itemId === inventory.item) {
+                // Selection frame: only around the FIRST occurrence of the equipped item,
+                // so a stack of 3 dynamites only shows one cursor.
+                if (slot.itemId === inventory.item && slot.isFirst) {
                     const selImg = images.selection;
                     if (selImg && selImg.complete) {
                         const pad = Math.max(4, slotSize * 0.1);
@@ -4892,8 +5421,17 @@ canvas {
         inventory.item = null;
         inventory.owned = [];
         inventory.showAnimActive = false;
+        // Clear any active bombs from previous game
+        bombs.length = 0;
         // Reset world items
         for (const item of worldItems) {
+            // Dynamite: NOT given in classroom — only in the kitchen.
+            // We still mark it as "picked" so the floor renderer skips it.
+            if (item.isDynamite) {
+                item.charges = 0;
+                item.picked = true;
+                continue;
+            }
             item.x = item.spawnX; item.y = item.spawnY;
             item.picked = false;
             item.dropped = false;
